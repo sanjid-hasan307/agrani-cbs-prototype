@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CBS Staff Portal Login | Agrani Bank</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f4f6f9;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .login-card {
+            max-width: 420px;
+            width: 100%;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            border: 1px solid #e2e8f0;
+            background: #ffffff;
+            overflow: hidden;
+        }
+        .login-header {
+            background: linear-gradient(135deg, #0d6efd, #0a58ca);
+            color: #ffffff;
+            padding: 2rem 1.5rem 1.5rem;
+            text-align: center;
+        }
+        .login-header h4 {
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+            letter-spacing: 0.5px;
+        }
+        .login-header p {
+            font-size: 0.875rem;
+            opacity: 0.9;
+            margin-bottom: 0;
+        }
+        .login-body {
+            padding: 2rem 1.75rem;
+        }
+        .form-label {
+            font-weight: 600;
+            font-size: 0.875rem;
+            color: #334155;
+        }
+        .form-control {
+            padding: 0.65rem 0.9rem;
+            border-radius: 8px;
+            border: 1px solid #cbd5e1;
+        }
+        .form-control:focus {
+            border-color: #0d6efd;
+            box-shadow: 0 0 0 0.2rem rgba(13, 110, 253, 0.15);
+        }
+        .btn-primary {
+            padding: 0.7rem;
+            border-radius: 8px;
+            font-weight: 600;
+            background-color: #0d6efd;
+            border: none;
+            width: 100%;
+        }
+        .btn-primary:hover {
+            background-color: #0b5ed7;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="login-header">
+            <h4>Agrani Bank CBS</h4>
+            <p>Core Banking System — Staff Authentication</p>
+        </div>
+        <div class="login-body">
+            {% if error %}
+            <div class="alert alert-danger py-2 px-3 mb-3" role="alert" style="font-size: 0.875rem;">
+                {{ error }}
+            </div>
+            {% endif %}
+
+            {% if messages %}
+                {% for message in messages %}
+                <div class="alert alert-{{ message.tags|default:'info' }} py-2 px-3 mb-3" role="alert" style="font-size: 0.875rem;">
+                    {{ message }}
+                </div>
+                {% endfor %}
+            {% endif %}
+
+            <form method="post" action="{% url 'login' %}">
+                {% csrf_token %}
+                <div class="mb-3">
+                    <label for="id_username" class="form-label">Username</label>
+                    <input type="text" name="username" class="form-control" id="id_username" placeholder="Enter employee username" required autofocus>
+                </div>
+                <div class="mb-4">
+                    <label for="id_password" class="form-label">Password</label>
+                    <input type="password" name="password" class="form-control" id="id_password" placeholder="Enter password" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Sign In to CBS</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

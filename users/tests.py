@@ -297,3 +297,172 @@ class BranchPermissionServiceTest(TestCase):
         self.assertFalse(can_approve_transaction(None, self.txn_a))
         self.assertFalse(can_approve_transaction(self.manager_a, None))
         self.assertFalse(can_approve_transaction(self.inactive_user, self.txn_a))
+
+
+from django.test import Client
+from users.views import get_user_role, get_user_staff_info, get_role_redirect_url
+
+
+class CBSAuthenticationTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.branch = Branch.objects.create(
+            branch_code="BR100",
+            branch_name="Motijheel Corporate",
+            district="Dhaka",
+            address="Motijheel C/A",
+            is_active=True,
+        )
+
+        self.teller_group, _ = Group.objects.get_or_create(name='Teller')
+        self.manager_group, _ = Group.objects.get_or_create(name='Manager')
+        self.auditor_group, _ = Group.objects.get_or_create(name='Auditor')
+
+        # 1. Teller
+        self.teller_user = User.objects.create_user(
+            username="cbs_teller",
+            password="TellerPassword123!",
+            first_name="Tariq",
+            last_name="Islam",
+        )
+        self.teller_user.groups.add(self.teller_group)
+        self.teller_profile = StaffProfile.objects.create(
+            user=self.teller_user,
+            employee_id="EMP_TEL_01",
+            branch=self.branch,
+            designation="Cash Officer",
+            is_active=True,
+        )
+
+        # 2. Manager
+        self.manager_user = User.objects.create_user(
+            username="cbs_manager",
+            password="ManagerPassword123!",
+            first_name="Hasina",
+            last_name="Begum",
+        )
+        self.manager_user.groups.add(self.manager_group)
+        self.manager_profile = StaffProfile.objects.create(
+            user=self.manager_user,
+            employee_id="EMP_MGR_01",
+            branch=self.branch,
+            designation="Branch Manager",
+            is_active=True,
+        )
+
+        # 3. Auditor
+        self.auditor_user = User.objects.create_user(
+            username="cbs_auditor",
+            password="AuditorPassword123!",
+            first_name="Kamal",
+            last_name="Hossain",
+        )
+        self.auditor_user.groups.add(self.auditor_group)
+        self.auditor_profile = StaffProfile.objects.create(
+            user=self.auditor_user,
+            employee_id="EMP_AUD_01",
+            branch=self.branch,
+            designation="Internal Auditor",
+            is_active=True,
+        )
+
+        # 4. Inactive user
+        self.inactive_user = User.objects.create_user(
+            username="cbs_inactive",
+            password="InactivePassword123!",
+            is_active=False,
+        )
+        self.inactive_user.groups.add(self.teller_group)
+        self.inactive_profile = StaffProfile.objects.create(
+            user=self.inactive_user,
+            employee_id="EMP_INACT_01",
+            branch=self.branch,
+            is_active=True,
+        )
+
+    def test_login_page_renders_get_request(self):
+        response = self.client.get('/login/')
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'users/login.html')
+
+    def test_valid_login_teller_redirects_to_teller_dashboard(self):
+        response = self.client.post('/login/', {
+            'username': 'cbs_teller',
+            'password': 'TellerPassword123!',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, '/dashboard/teller/')
+        self.assertEqual(int(self.client.session['_auth_user_id']), self.teller_user.id)
+
+    def test_valid_login_manager_redirects_to_manager_dashboard(self):
+        response = self.client.post('/login/', {
+            'username': 'cbs_manager',
+            'password': 'ManagerPassword123!',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, '/dashboard/manager/')
+        self.assertEqual(int(self.client.session['_auth_user_id']), self.manager_user.id)
+
+    def test_valid_login_auditor_redirects_to_auditor_dashboard(self):
+        response = self.client.post('/login/', {
+            'username': 'cbs_auditor',
+            'password': 'AuditorPassword123!',
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, '/dashboard/auditor/')
+        self.assertEqual(int(self.client.session['_auth_user_id']), self.auditor_user.id)
+
+    def test_invalid_password_fails_login(self):
+        response = self.client.post('/login/', {
+            'username': 'cbs_teller',
+            'password': 'WrongPassword999!',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('_auth_user_id', response.wsgi_request.session.keys() if hasattr(response, 'wsgi_request') else [])
+        self.assertNotIn('_auth_user_id', self.client.session)
+        self.assertContains(response, "Invalid username or password")
+
+    def test_inactive_user_blocked(self):
+        response = self.client.post('/login/', {
+            'username': 'cbs_inactive',
+            'password': 'InactivePassword123!',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('_auth_user_id', self.client.session)
+        self.assertContains(response, "inactive")
+
+    def test_role_detection_from_groups(self):
+        self.assertEqual(get_user_role(self.teller_user), 'Teller')
+        self.assertEqual(get_user_role(self.manager_user), 'Manager')
+        self.assertEqual(get_user_role(self.auditor_user), 'Auditor')
+
+        self.assertEqual(get_role_redirect_url(self.teller_user), '/dashboard/teller/')
+        self.assertEqual(get_role_redirect_url(self.manager_user), '/dashboard/manager/')
+        self.assertEqual(get_role_redirect_url(self.auditor_user), '/dashboard/auditor/')
+
+    def test_staff_profile_and_branch_detection(self):
+        profile, branch = get_user_staff_info(self.teller_user)
+        self.assertEqual(profile, self.teller_profile)
+        self.assertEqual(branch, self.branch)
+
+        mgr_profile, mgr_branch = get_user_staff_info(self.manager_user)
+        self.assertEqual(mgr_profile, self.manager_profile)
+        self.assertEqual(mgr_branch, self.branch)
+
+    def test_logout_view(self):
+        # First log in
+        self.client.login(username='cbs_teller', password='TellerPassword123!')
+        self.assertIn('_auth_user_id', self.client.session)
+
+        # Log out
+        response = self.client.get('/logout/')
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, '/login/')
+        self.assertNotIn('_auth_user_id', self.client.session)
+
+    def test_authenticated_user_accessing_login_redirects(self):
+        self.client.login(username='cbs_teller', password='TellerPassword123!')
+        response = self.client.get('/login/')
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, '/dashboard/teller/')
+
