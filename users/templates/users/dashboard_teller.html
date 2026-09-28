@@ -1,0 +1,92 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teller Dashboard | Agrani Bank CBS</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
+        .action-card { border-radius: 12px; border: none; box-shadow: 0 4px 16px rgba(0,0,0,0.07); cursor: not-allowed; opacity: 0.75; }
+        .action-card .card-body { padding: 1.5rem; }
+        .action-icon { font-size: 2rem; }
+        .info-card { border-radius: 12px; border: none; box-shadow: 0 4px 16px rgba(0,0,0,0.07); }
+        .section-header { font-weight: 600; color: #334155; border-bottom: 2px solid #e2e8f0; padding-bottom: .5rem; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark" style="background: linear-gradient(135deg,#0d6efd,#0a58ca);">
+        <div class="container">
+            <span class="navbar-brand">Agrani Bank CBS</span>
+            <div class="d-flex align-items-center gap-3">
+                <span class="text-white small">Teller Dashboard</span>
+                <a href="/logout/" class="btn btn-outline-light btn-sm" id="btn-logout">Logout</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container py-4">
+        <!-- Greeting -->
+        <div class="mb-4">
+            <h1 class="h4 fw-bold text-dark mb-0">Welcome, {{ user.get_full_name|default:user.username }}</h1>
+            <p class="text-muted small mb-0">Role: <strong>Teller</strong></p>
+        </div>
+
+        <!-- Branch Info -->
+        <div class="card info-card mb-4">
+            <div class="card-body">
+                <h2 class="section-header h6 mb-3">Branch Information</h2>
+                {% if branch %}
+                <div class="row g-2">
+                    <div class="col-sm-4"><span class="text-muted small">Branch Code</span><div class="fw-semibold">{{ branch.branch_code }}</div></div>
+                    <div class="col-sm-4"><span class="text-muted small">Branch Name</span><div class="fw-semibold">{{ branch.branch_name }}</div></div>
+                    <div class="col-sm-4"><span class="text-muted small">District</span><div class="fw-semibold">{{ branch.district }}</div></div>
+                </div>
+                {% else %}
+                <p class="text-muted small mb-0">No branch information available.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Transaction Action Placeholders -->
+        <div class="card info-card mb-4">
+            <div class="card-body">
+                <h2 class="section-header h6 mb-3">Available Transaction Actions</h2>
+                <div class="row g-3">
+                    <div class="col-sm-4">
+                        <div class="card action-card text-center" style="border-top: 4px solid #22c55e;" title="Coming soon">
+                            <div class="card-body">
+                                <div class="action-icon mb-2">&#128181;</div>
+                                <div class="fw-semibold">Cash Deposit</div>
+                                <p class="text-muted small mb-0">Deposit funds into account</p>
+                                <span class="badge bg-secondary mt-2">Coming Soon</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="card action-card text-center" style="border-top: 4px solid #ef4444;" title="Coming soon">
+                            <div class="card-body">
+                                <div class="action-icon mb-2">&#128176;</div>
+                                <div class="fw-semibold">Cash Withdrawal</div>
+                                <p class="text-muted small mb-0">Withdraw funds from account</p>
+                                <span class="badge bg-secondary mt-2">Coming Soon</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="card action-card text-center" style="border-top: 4px solid #3b82f6;" title="Coming soon">
+                            <div class="card-body">
+                                <div class="action-icon mb-2">&#128260;</div>
+                                <div class="fw-semibold">Fund Transfer</div>
+                                <p class="text-muted small mb-0">Transfer between accounts</p>
+                                <span class="badge bg-secondary mt-2">Coming Soon</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -466,3 +466,195 @@ class CBSAuthenticationTest(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, '/dashboard/teller/')
 
+
+
+# =============================================================================
+# Phase 4 — Dashboard Access Tests
+# =============================================================================
+
+class DashboardAccessTest(TestCase):
+    """
+    Tests for CBS role-based dashboard access control.
+
+    Verifies:
+    - Each role can access its own dashboard (200 OK, correct template).
+    - Each role is denied access to another role's dashboard (403 Forbidden).
+    - Unauthenticated requests are redirected to /login/.
+    """
+
+    def setUp(self):
+        self.branch = Branch.objects.create(
+            branch_code="BR200",
+            branch_name="Dashboard Test Branch",
+            district="Chittagong",
+            address="Agrabad C/A",
+            is_active=True,
+        )
+
+        self.manager_group, _ = Group.objects.get_or_create(name="Manager")
+        self.teller_group, _ = Group.objects.get_or_create(name="Teller")
+        self.auditor_group, _ = Group.objects.get_or_create(name="Auditor")
+
+        # Manager
+        self.manager_user = User.objects.create_user(
+            username="dash_manager",
+            password="ManagerPass123!",
+            first_name="Fatema",
+            last_name="Khanam",
+        )
+        self.manager_user.groups.add(self.manager_group)
+        StaffProfile.objects.create(
+            user=self.manager_user,
+            employee_id="EMP_D_MGR",
+            branch=self.branch,
+            designation="Branch Manager",
+            is_active=True,
+        )
+
+        # Teller
+        self.teller_user = User.objects.create_user(
+            username="dash_teller",
+            password="TellerPass123!",
+            first_name="Rafiq",
+            last_name="Ahmed",
+        )
+        self.teller_user.groups.add(self.teller_group)
+        StaffProfile.objects.create(
+            user=self.teller_user,
+            employee_id="EMP_D_TEL",
+            branch=self.branch,
+            designation="Teller Officer",
+            is_active=True,
+        )
+
+        # Auditor
+        self.auditor_user = User.objects.create_user(
+            username="dash_auditor",
+            password="AuditorPass123!",
+            first_name="Nasrin",
+            last_name="Sultana",
+        )
+        self.auditor_user.groups.add(self.auditor_group)
+        StaffProfile.objects.create(
+            user=self.auditor_user,
+            employee_id="EMP_D_AUD",
+            branch=self.branch,
+            designation="Internal Auditor",
+            is_active=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Manager dashboard
+    # ------------------------------------------------------------------
+
+    def test_manager_can_access_manager_dashboard(self):
+        self.client.login(username="dash_manager", password="ManagerPass123!")
+        response = self.client.get("/dashboard/manager/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "users/dashboard_manager.html")
+        self.assertContains(response, "Manager")
+
+    def test_manager_dashboard_shows_username(self):
+        self.client.login(username="dash_manager", password="ManagerPass123!")
+        response = self.client.get("/dashboard/manager/")
+        self.assertContains(response, "Fatema")
+
+    def test_manager_dashboard_shows_branch(self):
+        self.client.login(username="dash_manager", password="ManagerPass123!")
+        response = self.client.get("/dashboard/manager/")
+        self.assertContains(response, "Dashboard Test Branch")
+
+    # ------------------------------------------------------------------
+    # Teller dashboard
+    # ------------------------------------------------------------------
+
+    def test_teller_can_access_teller_dashboard(self):
+        self.client.login(username="dash_teller", password="TellerPass123!")
+        response = self.client.get("/dashboard/teller/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "users/dashboard_teller.html")
+        self.assertContains(response, "Teller")
+
+    def test_teller_dashboard_shows_username(self):
+        self.client.login(username="dash_teller", password="TellerPass123!")
+        response = self.client.get("/dashboard/teller/")
+        self.assertContains(response, "Rafiq")
+
+    def test_teller_dashboard_shows_branch(self):
+        self.client.login(username="dash_teller", password="TellerPass123!")
+        response = self.client.get("/dashboard/teller/")
+        self.assertContains(response, "Dashboard Test Branch")
+
+    # ------------------------------------------------------------------
+    # Auditor dashboard
+    # ------------------------------------------------------------------
+
+    def test_auditor_can_access_auditor_dashboard(self):
+        self.client.login(username="dash_auditor", password="AuditorPass123!")
+        response = self.client.get("/dashboard/auditor/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "users/dashboard_auditor.html")
+        self.assertContains(response, "Auditor")
+
+    def test_auditor_dashboard_shows_username(self):
+        self.client.login(username="dash_auditor", password="AuditorPass123!")
+        response = self.client.get("/dashboard/auditor/")
+        self.assertContains(response, "Nasrin")
+
+    def test_auditor_dashboard_shows_branch(self):
+        self.client.login(username="dash_auditor", password="AuditorPass123!")
+        response = self.client.get("/dashboard/auditor/")
+        self.assertContains(response, "Dashboard Test Branch")
+
+    # ------------------------------------------------------------------
+    # Cross-role access is blocked (403)
+    # ------------------------------------------------------------------
+
+    def test_teller_cannot_access_manager_dashboard(self):
+        self.client.login(username="dash_teller", password="TellerPass123!")
+        response = self.client.get("/dashboard/manager/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_teller_cannot_access_auditor_dashboard(self):
+        self.client.login(username="dash_teller", password="TellerPass123!")
+        response = self.client.get("/dashboard/auditor/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_manager_cannot_access_teller_dashboard(self):
+        self.client.login(username="dash_manager", password="ManagerPass123!")
+        response = self.client.get("/dashboard/teller/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_manager_cannot_access_auditor_dashboard(self):
+        self.client.login(username="dash_manager", password="ManagerPass123!")
+        response = self.client.get("/dashboard/auditor/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_auditor_cannot_access_manager_dashboard(self):
+        self.client.login(username="dash_auditor", password="AuditorPass123!")
+        response = self.client.get("/dashboard/manager/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_auditor_cannot_access_teller_dashboard(self):
+        self.client.login(username="dash_auditor", password="AuditorPass123!")
+        response = self.client.get("/dashboard/teller/")
+        self.assertEqual(response.status_code, 403)
+
+    # ------------------------------------------------------------------
+    # Unauthenticated access redirects to login
+    # ------------------------------------------------------------------
+
+    def test_unauthenticated_manager_dashboard_redirects_to_login(self):
+        response = self.client.get("/dashboard/manager/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response.url)
+
+    def test_unauthenticated_teller_dashboard_redirects_to_login(self):
+        response = self.client.get("/dashboard/teller/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response.url)
+
+    def test_unauthenticated_auditor_dashboard_redirects_to_login(self):
+        response = self.client.get("/dashboard/auditor/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response.url)
