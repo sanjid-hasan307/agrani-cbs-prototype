@@ -10,6 +10,7 @@ from branches.models import Branch
 from customers.models import Customer
 from products.models import AccountProduct
 from accounts.models import Account
+from audit.models import AuditLog
 from transactions.models import Transaction, TransactionEntry
 from transactions.services.deposit_service import deposit
 from transactions.services.withdrawal_service import withdraw
@@ -626,3 +627,276 @@ class MakerCheckerAuthorizationTest(TestCase):
         txn.refresh_from_db()
         self.assertEqual(txn.authorization_status, Transaction.AuthorizationStatus.PENDING)
         self.assertEqual(txn.status, Transaction.Status.PENDING)
+
+
+class TransactionCreationAuditTest(TestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(
+            branch_code="BR001",
+            branch_name="Main Branch",
+            district="Dhaka",
+            address="123 Motijheel C/A",
+            is_active=True,
+        )
+        self.teller = User.objects.create_user(username="audit_teller", password="Password123!")
+        self.customer1 = Customer.objects.create(
+            customer_type=Customer.CustomerType.INDIVIDUAL,
+            full_name="Abdur Rahim",
+            date_of_birth=date(1988, 5, 12),
+            nid_number="1988123456789",
+            phone="01710000001",
+            present_address="10 Motijheel, Dhaka",
+            district="Dhaka",
+            home_branch=self.branch,
+            created_by=self.teller,
+            status=Customer.Status.ACTIVE,
+        )
+        self.customer2 = Customer.objects.create(
+            customer_type=Customer.CustomerType.INDIVIDUAL,
+            full_name="Fatema Begum",
+            date_of_birth=date(1990, 8, 22),
+            nid_number="1990987654321",
+            phone="01710000002",
+            present_address="20 Dhanmondi, Dhaka",
+            district="Dhaka",
+            home_branch=self.branch,
+            created_by=self.teller,
+            status=Customer.Status.ACTIVE,
+        )
+        self.product = AccountProduct.objects.get(product_code="SAV")
+        self.account1 = Account.objects.create(
+            customer=self.customer1,
+            product=self.product,
+            branch=self.branch,
+        )
+        self.account2 = Account.objects.create(
+            customer=self.customer2,
+            product=self.product,
+            branch=self.branch,
+        )
+
+    def test_deposit_creation_creates_audit_log(self):
+        """Verify that successful deposit creation automatically creates an AuditLog with correct details."""
+        initial_log_count = AuditLog.objects.count()
+
+        txn = deposit(
+            account=self.account1,
+            amount=Decimal("15000.00"),
+            created_by=self.teller,
+            description="Customer cash deposit",
+        )
+
+        self.assertEqual(AuditLog.objects.count(), initial_log_count + 1)
+        audit = AuditLog.objects.filter(object_id=txn.transaction_id).first()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.user, self.teller)
+        self.assertEqual(audit.action, "CREATE_DEPOSIT")
+        self.assertEqual(audit.model_name, "Transaction")
+        self.assertEqual(audit.object_id, txn.transaction_id)
+        self.assertIn("15000.00", audit.description)
+        self.assertIn(self.account1.account_number, audit.description)
+        self.assertIn("Customer cash deposit", audit.description)
+
+    def test_withdrawal_creation_creates_audit_log(self):
+        """Verify that successful withdrawal creation automatically creates an AuditLog with correct details."""
+        # Fund account directly for withdrawal setup
+        self.account1.available_balance = Decimal("25000.00")
+        self.account1.ledger_balance = Decimal("25000.00")
+        self.account1.save()
+
+        initial_log_count = AuditLog.objects.count()
+
+        txn = withdraw(
+            account=self.account1,
+            amount=Decimal("7000.00"),
+            created_by=self.teller,
+            description="Branch counter withdrawal",
+        )
+
+        self.assertEqual(AuditLog.objects.count(), initial_log_count + 1)
+        audit = AuditLog.objects.filter(object_id=txn.transaction_id).first()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.user, self.teller)
+        self.assertEqual(audit.action, "CREATE_WITHDRAWAL")
+        self.assertEqual(audit.model_name, "Transaction")
+        self.assertEqual(audit.object_id, txn.transaction_id)
+        self.assertIn("7000.00", audit.description)
+        self.assertIn(self.account1.account_number, audit.description)
+        self.assertIn("Branch counter withdrawal", audit.description)
+
+    def test_transfer_creation_creates_audit_log(self):
+        """Verify that successful transfer creation automatically creates an AuditLog with correct details."""
+        # Fund sender account
+        self.account1.available_balance = Decimal("50000.00")
+        self.account1.ledger_balance = Decimal("50000.00")
+        self.account1.save()
+
+        initial_log_count = AuditLog.objects.count()
+
+        txn = transfer(
+            from_account=self.account1,
+            to_account=self.account2,
+            amount=Decimal("12000.00"),
+            created_by=self.teller,
+            description="Inter-account tuition transfer",
+        )
+
+        self.assertEqual(AuditLog.objects.count(), initial_log_count + 1)
+        audit = AuditLog.objects.filter(object_id=txn.transaction_id).first()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.user, self.teller)
+        self.assertEqual(audit.action, "CREATE_TRANSFER")
+        self.assertEqual(audit.model_name, "Transaction")
+        self.assertEqual(audit.object_id, txn.transaction_id)
+        self.assertIn("12000.00", audit.description)
+        self.assertIn(self.account1.account_number, audit.description)
+        self.assertIn(self.account2.account_number, audit.description)
+        self.assertIn("Inter-account tuition transfer", audit.description)
+
+    def test_failed_transaction_does_not_create_audit_log(self):
+        """Verify that failed transaction attempts do not produce audit log records."""
+        initial_log_count = AuditLog.objects.count()
+
+        # 1. Invalid amount deposit
+        with self.assertRaises(ValidationError):
+            deposit(account=self.account1, amount=Decimal("-100.00"), created_by=self.teller)
+
+        # 2. Insufficient balance withdrawal
+        with self.assertRaises(ValidationError):
+            withdraw(account=self.account1, amount=Decimal("999999.00"), created_by=self.teller)
+
+        # 3. Same-account transfer
+        with self.assertRaises(ValidationError):
+            transfer(from_account=self.account1, to_account=self.account1, amount=Decimal("100.00"), created_by=self.teller)
+
+        # Confirm no audit logs were created
+        self.assertEqual(AuditLog.objects.count(), initial_log_count)
+
+
+class TransactionAuthorizationAuditTest(TestCase):
+    def setUp(self):
+        self.branch = Branch.objects.create(
+            branch_code="BR001",
+            branch_name="Main Branch",
+            district="Dhaka",
+            address="123 Motijheel C/A",
+            is_active=True,
+        )
+
+        self.manager_group, _ = Group.objects.get_or_create(name='Manager')
+        self.teller_group, _ = Group.objects.get_or_create(name='Teller')
+
+        self.maker_teller = User.objects.create_user(username="maker_teller_auth", password="Password123!")
+        self.maker_teller.groups.add(self.teller_group)
+
+        self.other_teller = User.objects.create_user(username="other_teller_auth", password="Password123!")
+        self.other_teller.groups.add(self.teller_group)
+
+        self.checker_manager = User.objects.create_user(username="checker_manager_auth", password="Password123!")
+        self.checker_manager.groups.add(self.manager_group)
+
+        self.customer = Customer.objects.create(
+            customer_type=Customer.CustomerType.INDIVIDUAL,
+            full_name="Abdur Rahim",
+            date_of_birth=date(1985, 3, 20),
+            nid_number="1985123456789",
+            phone="01811111111",
+            present_address="45 Gulshan, Dhaka",
+            district="Dhaka",
+            home_branch=self.branch,
+            created_by=self.maker_teller,
+            status=Customer.Status.ACTIVE,
+        )
+        self.product = AccountProduct.objects.get(product_code="SAV")
+        self.account = Account.objects.create(
+            customer=self.customer,
+            product=self.product,
+            branch=self.branch,
+        )
+
+    def test_approval_creates_audit_log(self):
+        """Verify that successful approval creates an AuditLog with correct checker user, action, object_id, and description."""
+        txn = deposit(account=self.account, amount=Decimal("10000.00"), created_by=self.maker_teller)
+
+        initial_count = AuditLog.objects.filter(action="APPROVE_TRANSACTION").count()
+
+        approved_txn = approve_transaction(transaction=txn, checker_user=self.checker_manager)
+
+        self.assertEqual(AuditLog.objects.filter(action="APPROVE_TRANSACTION").count(), initial_count + 1)
+        audit = AuditLog.objects.filter(action="APPROVE_TRANSACTION", object_id=txn.transaction_id).first()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.user, self.checker_manager)
+        self.assertEqual(audit.action, "APPROVE_TRANSACTION")
+        self.assertEqual(audit.model_name, "Transaction")
+        self.assertEqual(audit.object_id, txn.transaction_id)
+        self.assertIn("Approved", audit.description)
+        self.assertIn(txn.transaction_id, audit.description)
+        self.assertIn("10000.00", audit.description)
+
+    def test_rejection_creates_audit_log(self):
+        """Verify that successful rejection creates an AuditLog with checker user, action, object_id, and reason."""
+        txn = deposit(account=self.account, amount=Decimal("5000.00"), created_by=self.maker_teller)
+
+        initial_count = AuditLog.objects.filter(action="REJECT_TRANSACTION").count()
+        rejection_reason = "Customer signature does not match records"
+
+        rejected_txn = reject_transaction(
+            transaction=txn,
+            checker_user=self.checker_manager,
+            reason=rejection_reason,
+        )
+
+        self.assertEqual(AuditLog.objects.filter(action="REJECT_TRANSACTION").count(), initial_count + 1)
+        audit = AuditLog.objects.filter(action="REJECT_TRANSACTION", object_id=txn.transaction_id).first()
+        self.assertIsNotNone(audit)
+        self.assertEqual(audit.user, self.checker_manager)
+        self.assertEqual(audit.action, "REJECT_TRANSACTION")
+        self.assertEqual(audit.model_name, "Transaction")
+        self.assertEqual(audit.object_id, txn.transaction_id)
+        self.assertIn("Rejected", audit.description)
+        self.assertIn(txn.transaction_id, audit.description)
+        self.assertIn(rejection_reason, audit.description)
+
+    def test_failed_approval_does_not_create_audit_log(self):
+        """Verify that failed approval attempts (role check, maker-checker, posting error) do not create audit log."""
+        txn = deposit(account=self.account, amount=Decimal("2000.00"), created_by=self.maker_teller)
+
+        # 1. Non-manager attempts approval
+        with self.assertRaises(ValidationError):
+            approve_transaction(transaction=txn, checker_user=self.other_teller)
+        self.assertEqual(AuditLog.objects.filter(action="APPROVE_TRANSACTION").count(), 0)
+
+        # 2. Maker attempts to approve own transaction (maker is in Manager group)
+        maker_manager = User.objects.create_user(username="maker_mgr", password="Password123!")
+        maker_manager.groups.add(self.manager_group)
+        mgr_txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=maker_manager)
+
+        with self.assertRaises(ValidationError):
+            approve_transaction(transaction=mgr_txn, checker_user=maker_manager)
+        self.assertEqual(AuditLog.objects.filter(action="APPROVE_TRANSACTION").count(), 0)
+
+        # 3. Failed posting rolls back approval and does NOT create audit log
+        with patch('transactions.services.authorization_service.post_transaction', side_effect=Exception("Posting failure")):
+            with self.assertRaises(Exception):
+                approve_transaction(transaction=txn, checker_user=self.checker_manager)
+        self.assertEqual(AuditLog.objects.filter(action="APPROVE_TRANSACTION").count(), 0)
+
+    def test_failed_rejection_does_not_create_audit_log(self):
+        """Verify that failed rejection attempts do not create audit log."""
+        txn = deposit(account=self.account, amount=Decimal("2000.00"), created_by=self.maker_teller)
+
+        # 1. Non-manager attempts rejection
+        with self.assertRaises(ValidationError):
+            reject_transaction(transaction=txn, checker_user=self.other_teller, reason="Unauthorized")
+        self.assertEqual(AuditLog.objects.filter(action="REJECT_TRANSACTION").count(), 0)
+
+        # 2. Maker attempts to reject own transaction
+        maker_manager = User.objects.create_user(username="maker_mgr2", password="Password123!")
+        maker_manager.groups.add(self.manager_group)
+        mgr_txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=maker_manager)
+
+        with self.assertRaises(ValidationError):
+            reject_transaction(transaction=mgr_txn, checker_user=maker_manager, reason="Self reject")
+        self.assertEqual(AuditLog.objects.filter(action="REJECT_TRANSACTION").count(), 0)
+
+

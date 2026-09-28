@@ -14,6 +14,7 @@ from django.db import transaction as db_transaction
 from django.core.exceptions import ValidationError
 from django.contrib.auth.models import User
 
+from audit.models import AuditLog
 from transactions.models import Transaction
 from transactions.services.posting_service import post_transaction
 
@@ -68,6 +69,19 @@ def approve_transaction(transaction: Transaction, checker_user: User) -> Transac
         # 5. Call posting service to atomically update balances and set status = POSTED
         transaction = post_transaction(transaction)
 
+        # 6. Record audit log
+        audit_description = (
+            f"Approved {transaction.transaction_type} transaction {transaction.transaction_id} "
+            f"of amount {transaction.amount}"
+        )
+        AuditLog.objects.create(
+            user=checker_user,
+            action="APPROVE_TRANSACTION",
+            model_name="Transaction",
+            object_id=transaction.transaction_id,
+            description=audit_description,
+        )
+
     return transaction
 
 
@@ -101,14 +115,30 @@ def reject_transaction(transaction: Transaction, checker_user: User, reason: str
                                       f"Current status: {transaction.authorization_status}."}
         )
 
-    # 4. Apply rejection state changes
-    transaction.authorization_status = Transaction.AuthorizationStatus.REJECTED
-    transaction.status = Transaction.Status.REJECTED
-    transaction.approved_by = checker_user
-    transaction.approved_at = timezone.now()
-    transaction.rejection_reason = reason
-    transaction.save(update_fields=[
-        "authorization_status", "status", "approved_by", "approved_at", "rejection_reason", "updated_at"
-    ])
+    with db_transaction.atomic():
+        # 4. Apply rejection state changes
+        transaction.authorization_status = Transaction.AuthorizationStatus.REJECTED
+        transaction.status = Transaction.Status.REJECTED
+        transaction.approved_by = checker_user
+        transaction.approved_at = timezone.now()
+        transaction.rejection_reason = reason
+        transaction.save(update_fields=[
+            "authorization_status", "status", "approved_by", "approved_at", "rejection_reason", "updated_at"
+        ])
+
+        # 5. Record audit log
+        audit_description = (
+            f"Rejected {transaction.transaction_type} transaction {transaction.transaction_id} "
+            f"of amount {transaction.amount}"
+        )
+        if reason:
+            audit_description += f". Reason: {reason}"
+        AuditLog.objects.create(
+            user=checker_user,
+            action="REJECT_TRANSACTION",
+            model_name="Transaction",
+            object_id=transaction.transaction_id,
+            description=audit_description,
+        )
 
     return transaction

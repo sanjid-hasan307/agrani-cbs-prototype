@@ -12,6 +12,7 @@ from django.db import transaction as db_transaction
 from django.core.exceptions import ValidationError
 
 from accounts.models import Account
+from audit.models import AuditLog
 from transactions.models import Transaction, TransactionEntry
 
 
@@ -102,5 +103,20 @@ def transfer(
 
         # 3. Validate debit == credit entries
         txn.validate_entries_balance()
+
+        # 4. Record audit log
+        audit_description = (
+            f"Initiated transfer of {amount} from account {from_account.account_number} "
+            f"to account {to_account.account_number}"
+        )
+        if description:
+            audit_description += f": {description}"
+        AuditLog.objects.create(
+            user=created_by,
+            action="CREATE_TRANSFER",
+            model_name="Transaction",
+            object_id=txn.transaction_id,
+            description=audit_description,
+        )
 
     return txn
