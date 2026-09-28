@@ -7,6 +7,7 @@ from django.contrib.auth.models import User, Group
 from rest_framework.test import APIClient
 from rest_framework import status
 from branches.models import Branch
+from users.models import StaffProfile
 from customers.models import Customer
 from products.models import AccountProduct
 from accounts.models import Account
@@ -156,9 +157,11 @@ class DepositServiceTest(TestCase):
             is_active=True,
         )
         self.user = User.objects.create_user(username="teller1", password="Password123!")
+        StaffProfile.objects.create(user=self.user, employee_id="EMP_DEP_T1", branch=self.branch, is_active=True)
         self.manager_group, _ = Group.objects.get_or_create(name='Manager')
         self.manager = User.objects.create_user(username="manager1", password="Password123!")
         self.manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=self.manager, employee_id="EMP_DEP_M1", branch=self.branch, is_active=True)
 
         self.customer = Customer.objects.create(
             customer_type=Customer.CustomerType.INDIVIDUAL,
@@ -288,9 +291,11 @@ class WithdrawalServiceTest(TestCase):
             is_active=True,
         )
         self.user = User.objects.create_user(username="teller1", password="Password123!")
+        StaffProfile.objects.create(user=self.user, employee_id="EMP_WDR_T1", branch=self.branch, is_active=True)
         self.manager_group, _ = Group.objects.get_or_create(name='Manager')
         self.manager = User.objects.create_user(username="manager1", password="Password123!")
         self.manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=self.manager, employee_id="EMP_WDR_M1", branch=self.branch, is_active=True)
 
         self.customer = Customer.objects.create(
             customer_type=Customer.CustomerType.INDIVIDUAL,
@@ -402,9 +407,11 @@ class TransferServiceTest(TestCase):
             is_active=True,
         )
         self.user = User.objects.create_user(username="teller1", password="Password123!")
+        StaffProfile.objects.create(user=self.user, employee_id="EMP_TRF_T1", branch=self.branch, is_active=True)
         self.manager_group, _ = Group.objects.get_or_create(name='Manager')
         self.manager = User.objects.create_user(username="manager1", password="Password123!")
         self.manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=self.manager, employee_id="EMP_TRF_M1", branch=self.branch, is_active=True)
 
         self.customer1 = Customer.objects.create(
             customer_type=Customer.CustomerType.INDIVIDUAL,
@@ -534,15 +541,19 @@ class MakerCheckerAuthorizationTest(TestCase):
 
         self.maker_teller = User.objects.create_user(username="maker_teller", password="Password123!")
         self.maker_teller.groups.add(self.teller_group)
+        StaffProfile.objects.create(user=self.maker_teller, employee_id="EMP_MC_T1", branch=self.branch, is_active=True)
 
         self.other_teller = User.objects.create_user(username="other_teller", password="Password123!")
         self.other_teller.groups.add(self.teller_group)
+        StaffProfile.objects.create(user=self.other_teller, employee_id="EMP_MC_T2", branch=self.branch, is_active=True)
 
         self.checker_manager = User.objects.create_user(username="checker_manager", password="Password123!")
         self.checker_manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=self.checker_manager, employee_id="EMP_MC_M1", branch=self.branch, is_active=True)
 
         self.maker_manager = User.objects.create_user(username="maker_manager", password="Password123!")
         self.maker_manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=self.maker_manager, employee_id="EMP_MC_M2", branch=self.branch, is_active=True)
 
         self.customer = Customer.objects.create(
             customer_type=Customer.CustomerType.INDIVIDUAL,
@@ -610,6 +621,7 @@ class MakerCheckerAuthorizationTest(TestCase):
 
         other_manager = User.objects.create_user(username="other_manager", password="Password123!")
         other_manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=other_manager, employee_id="EMP_MC_OM1", branch=self.branch, is_active=True)
 
         with self.assertRaises(ValidationError) as ctx:
             approve_transaction(transaction=txn, checker_user=other_manager)
@@ -639,6 +651,7 @@ class TransactionCreationAuditTest(TestCase):
             is_active=True,
         )
         self.teller = User.objects.create_user(username="audit_teller", password="Password123!")
+        StaffProfile.objects.create(user=self.teller, employee_id="EMP_AUD_T1", branch=self.branch, is_active=True)
         self.customer1 = Customer.objects.create(
             customer_type=Customer.CustomerType.INDIVIDUAL,
             full_name="Abdur Rahim",
@@ -788,12 +801,15 @@ class TransactionAuthorizationAuditTest(TestCase):
 
         self.maker_teller = User.objects.create_user(username="maker_teller_auth", password="Password123!")
         self.maker_teller.groups.add(self.teller_group)
+        StaffProfile.objects.create(user=self.maker_teller, employee_id="EMP_AUTH_T1", branch=self.branch, is_active=True)
 
         self.other_teller = User.objects.create_user(username="other_teller_auth", password="Password123!")
         self.other_teller.groups.add(self.teller_group)
+        StaffProfile.objects.create(user=self.other_teller, employee_id="EMP_AUTH_T2", branch=self.branch, is_active=True)
 
         self.checker_manager = User.objects.create_user(username="checker_manager_auth", password="Password123!")
         self.checker_manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=self.checker_manager, employee_id="EMP_AUTH_M1", branch=self.branch, is_active=True)
 
         self.customer = Customer.objects.create(
             customer_type=Customer.CustomerType.INDIVIDUAL,
@@ -869,6 +885,7 @@ class TransactionAuthorizationAuditTest(TestCase):
         # 2. Maker attempts to approve own transaction (maker is in Manager group)
         maker_manager = User.objects.create_user(username="maker_mgr", password="Password123!")
         maker_manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=maker_manager, employee_id="EMP_AUTH_MM1", branch=self.branch, is_active=True)
         mgr_txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=maker_manager)
 
         with self.assertRaises(ValidationError):
@@ -893,10 +910,233 @@ class TransactionAuthorizationAuditTest(TestCase):
         # 2. Maker attempts to reject own transaction
         maker_manager = User.objects.create_user(username="maker_mgr2", password="Password123!")
         maker_manager.groups.add(self.manager_group)
+        StaffProfile.objects.create(user=maker_manager, employee_id="EMP_AUTH_MM2", branch=self.branch, is_active=True)
         mgr_txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=maker_manager)
 
         with self.assertRaises(ValidationError):
             reject_transaction(transaction=mgr_txn, checker_user=maker_manager, reason="Self reject")
         self.assertEqual(AuditLog.objects.filter(action="REJECT_TRANSACTION").count(), 0)
+
+
+class TransactionBranchAccessControlTest(TestCase):
+    def setUp(self):
+        # 1. Create Branches
+        self.branch_a = Branch.objects.create(
+            branch_code="BR_DAC",
+            branch_name="Dhaka Main Branch",
+            district="Dhaka",
+            address="Motijheel C/A",
+            is_active=True,
+        )
+        self.branch_b = Branch.objects.create(
+            branch_code="BR_CTG",
+            branch_name="Chittagong Branch",
+            district="Chittagong",
+            address="Agrabad C/A",
+            is_active=True,
+        )
+
+        # 2. Create Staff in Branch A
+        self.teller_a = User.objects.create_user(username="teller_a", password="Password123!")
+        StaffProfile.objects.create(
+            user=self.teller_a,
+            employee_id="EMP_BR_TA",
+            branch=self.branch_a,
+            is_active=True,
+        )
+
+        # 3. Create Staff in Branch B
+        self.teller_b = User.objects.create_user(username="teller_b", password="Password123!")
+        StaffProfile.objects.create(
+            user=self.teller_b,
+            employee_id="EMP_BR_TB",
+            branch=self.branch_b,
+            is_active=True,
+        )
+
+        # 4. Superuser
+        self.superuser = User.objects.create_superuser(
+            username="super_maker",
+            email="super@agranicbs.com",
+            password="Password123!",
+        )
+
+        # 5. Product & Customers & Accounts
+        self.product = AccountProduct.objects.get(product_code="SAV")
+
+        self.customer_a = Customer.objects.create(
+            customer_type=Customer.CustomerType.INDIVIDUAL,
+            full_name="Customer A",
+            date_of_birth=date(1990, 1, 1),
+            nid_number="NID_A_001",
+            phone="01700000001",
+            present_address="Dhaka",
+            district="Dhaka",
+            home_branch=self.branch_a,
+            created_by=self.teller_a,
+            status=Customer.Status.ACTIVE,
+        )
+        self.account_a = Account.objects.create(
+            customer=self.customer_a,
+            product=self.product,
+            branch=self.branch_a,
+            available_balance=Decimal("50000.00"),
+            ledger_balance=Decimal("50000.00"),
+        )
+
+        self.customer_b = Customer.objects.create(
+            customer_type=Customer.CustomerType.INDIVIDUAL,
+            full_name="Customer B",
+            date_of_birth=date(1992, 2, 2),
+            nid_number="NID_B_002",
+            phone="01700000002",
+            present_address="Chittagong",
+            district="Chittagong",
+            home_branch=self.branch_b,
+            created_by=self.teller_b,
+            status=Customer.Status.ACTIVE,
+        )
+        self.account_b = Account.objects.create(
+            customer=self.customer_b,
+            product=self.product,
+            branch=self.branch_b,
+            available_balance=Decimal("30000.00"),
+            ledger_balance=Decimal("30000.00"),
+        )
+
+    # --- Deposit Tests ---
+    def test_deposit_same_branch_success(self):
+        initial_audit_count = AuditLog.objects.filter(action="CREATE_DEPOSIT").count()
+        txn = deposit(
+            account=self.account_a,
+            amount=Decimal("5000.00"),
+            created_by=self.teller_a,
+            description="Branch A teller depositing to Branch A account",
+        )
+        self.assertEqual(txn.status, Transaction.Status.PENDING)
+        self.assertEqual(txn.account, self.account_a)
+        self.assertEqual(txn.created_by, self.teller_a)
+        self.assertEqual(AuditLog.objects.filter(action="CREATE_DEPOSIT").count(), initial_audit_count + 1)
+
+    def test_deposit_different_branch_failure(self):
+        with self.assertRaises(ValidationError) as ctx:
+            deposit(
+                account=self.account_a,
+                amount=Decimal("5000.00"),
+                created_by=self.teller_b,
+                description="Branch B teller depositing to Branch A account",
+            )
+        self.assertIn("created_by", ctx.exception.message_dict)
+
+    def test_deposit_different_branch_creates_no_audit_log(self):
+        initial_audit_count = AuditLog.objects.count()
+        with self.assertRaises(ValidationError):
+            deposit(
+                account=self.account_a,
+                amount=Decimal("5000.00"),
+                created_by=self.teller_b,
+            )
+        self.assertEqual(AuditLog.objects.count(), initial_audit_count)
+
+    # --- Withdrawal Tests ---
+    def test_withdrawal_same_branch_success(self):
+        initial_audit_count = AuditLog.objects.filter(action="CREATE_WITHDRAWAL").count()
+        txn = withdraw(
+            account=self.account_a,
+            amount=Decimal("2000.00"),
+            created_by=self.teller_a,
+            description="Branch A teller withdrawing from Branch A account",
+        )
+        self.assertEqual(txn.status, Transaction.Status.PENDING)
+        self.assertEqual(txn.account, self.account_a)
+        self.assertEqual(txn.created_by, self.teller_a)
+        self.assertEqual(AuditLog.objects.filter(action="CREATE_WITHDRAWAL").count(), initial_audit_count + 1)
+
+    def test_withdrawal_different_branch_failure(self):
+        with self.assertRaises(ValidationError) as ctx:
+            withdraw(
+                account=self.account_a,
+                amount=Decimal("2000.00"),
+                created_by=self.teller_b,
+                description="Branch B teller withdrawing from Branch A account",
+            )
+        self.assertIn("created_by", ctx.exception.message_dict)
+
+    def test_withdrawal_different_branch_creates_no_audit_log(self):
+        initial_audit_count = AuditLog.objects.count()
+        with self.assertRaises(ValidationError):
+            withdraw(
+                account=self.account_a,
+                amount=Decimal("2000.00"),
+                created_by=self.teller_b,
+            )
+        self.assertEqual(AuditLog.objects.count(), initial_audit_count)
+
+    # --- Transfer Tests ---
+    def test_transfer_same_source_branch_success(self):
+        # Maker belongs to Branch A (source account branch). Destination account is Branch B.
+        initial_audit_count = AuditLog.objects.filter(action="CREATE_TRANSFER").count()
+        txn = transfer(
+            from_account=self.account_a,
+            to_account=self.account_b,
+            amount=Decimal("3000.00"),
+            created_by=self.teller_a,
+            description="Branch A teller transferring from Branch A to Branch B",
+        )
+        self.assertEqual(txn.status, Transaction.Status.PENDING)
+        self.assertEqual(txn.account, self.account_a)
+        self.assertEqual(txn.created_by, self.teller_a)
+        self.assertEqual(AuditLog.objects.filter(action="CREATE_TRANSFER").count(), initial_audit_count + 1)
+
+    def test_transfer_different_source_branch_failure(self):
+        # Maker belongs to Branch B, but source account is in Branch A -> must fail
+        with self.assertRaises(ValidationError) as ctx:
+            transfer(
+                from_account=self.account_a,
+                to_account=self.account_b,
+                amount=Decimal("3000.00"),
+                created_by=self.teller_b,
+                description="Branch B teller transferring from Branch A to Branch B",
+            )
+        self.assertIn("created_by", ctx.exception.message_dict)
+
+    def test_transfer_different_branch_creates_no_audit_log(self):
+        initial_audit_count = AuditLog.objects.count()
+        with self.assertRaises(ValidationError):
+            transfer(
+                from_account=self.account_a,
+                to_account=self.account_b,
+                amount=Decimal("3000.00"),
+                created_by=self.teller_b,
+            )
+        self.assertEqual(AuditLog.objects.count(), initial_audit_count)
+
+    # --- Superuser Bypass Tests ---
+    def test_superuser_can_operate_across_branches(self):
+        # Superuser can deposit to Branch A
+        dep_txn = deposit(
+            account=self.account_a,
+            amount=Decimal("1000.00"),
+            created_by=self.superuser,
+        )
+        self.assertEqual(dep_txn.status, Transaction.Status.PENDING)
+
+        # Superuser can withdraw from Branch B
+        wdr_txn = withdraw(
+            account=self.account_b,
+            amount=Decimal("1000.00"),
+            created_by=self.superuser,
+        )
+        self.assertEqual(wdr_txn.status, Transaction.Status.PENDING)
+
+        # Superuser can transfer from Branch A to Branch B
+        trf_txn = transfer(
+            from_account=self.account_a,
+            to_account=self.account_b,
+            amount=Decimal("1000.00"),
+            created_by=self.superuser,
+        )
+        self.assertEqual(trf_txn.status, Transaction.Status.PENDING)
+
 
 

@@ -14,6 +14,7 @@ from django.core.exceptions import ValidationError
 from accounts.models import Account
 from audit.models import AuditLog
 from transactions.models import Transaction, TransactionEntry
+from users.services.branch_permission import can_access_account
 
 
 def deposit(account: Account, amount: Decimal, created_by, description: str = "") -> Transaction:
@@ -31,9 +32,15 @@ def deposit(account: Account, amount: Decimal, created_by, description: str = ""
         The created PENDING Transaction instance.
 
     Raises:
-        ValidationError: If the account is not ACTIVE, or amount is not positive.
+        ValidationError: If maker lacks branch access permission, account is not ACTIVE, or amount is not positive.
         ValueError:      If a non-Decimal amount is provided.
     """
+    # --- Guard: branch access permission ---
+    if not can_access_account(created_by, account):
+        raise ValidationError(
+            {"created_by": "Maker does not have permission to access accounts in this branch."}
+        )
+
     # --- Guard: enforce Decimal ---
     if not isinstance(amount, Decimal):
         raise ValueError("amount must be a Decimal instance, not float or other type.")

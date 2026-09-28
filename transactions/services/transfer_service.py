@@ -14,6 +14,7 @@ from django.core.exceptions import ValidationError
 from accounts.models import Account
 from audit.models import AuditLog
 from transactions.models import Transaction, TransactionEntry
+from users.services.branch_permission import can_access_account
 
 
 def transfer(
@@ -38,10 +39,16 @@ def transfer(
         The created PENDING Transaction instance.
 
     Raises:
-        ValidationError: If accounts are invalid, inactive, identical, amount is not positive,
-                         or sender has insufficient balance.
+        ValidationError: If maker lacks branch access permission for source account, accounts are invalid,
+                         inactive, identical, amount is not positive, or sender has insufficient balance.
         ValueError:      If a non-Decimal amount is provided.
     """
+    # --- Guard: branch access permission (maker must belong to source account branch) ---
+    if not can_access_account(created_by, from_account):
+        raise ValidationError(
+            {"created_by": "Maker does not have permission to access source accounts in this branch."}
+        )
+
     # --- Guard: enforce Decimal ---
     if not isinstance(amount, Decimal):
         raise ValueError("amount must be a Decimal instance, not float or other type.")
