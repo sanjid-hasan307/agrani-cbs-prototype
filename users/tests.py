@@ -658,3 +658,298 @@ class DashboardAccessTest(TestCase):
         response = self.client.get("/dashboard/auditor/")
         self.assertEqual(response.status_code, 302)
         self.assertIn("/login/", response.url)
+
+
+# =============================================================================
+# Phase 5 — Manager Approval Dashboard Integration Tests
+# =============================================================================
+
+class ManagerApprovalDashboardTest(TestCase):
+    """
+    Tests for Phase 5: Manager Approval Dashboard Integration.
+
+    Verifies:
+    - Manager sees pending transactions for own branch only.
+    - Manager cannot see pending transactions from other branches.
+    - Manager can approve pending transactions from dashboard.
+    - Manager can reject pending transactions from dashboard with rejection reason.
+    - Teller cannot access approval or rejection endpoints (403 Forbidden).
+    - Manager cannot approve or reject transactions from other branches (403 Forbidden).
+    """
+
+    def setUp(self):
+        # Roles
+        self.manager_group, _ = Group.objects.get_or_create(name="Manager")
+        self.teller_group, _ = Group.objects.get_or_create(name="Teller")
+
+        # Branches
+        self.branch_a = Branch.objects.create(
+            branch_code="BR501",
+            branch_name="Agrabad Branch",
+            district="Chittagong",
+            address="Agrabad C/A",
+            is_active=True,
+        )
+        self.branch_b = Branch.objects.create(
+            branch_code="BR502",
+            branch_name="Motijheel Branch",
+            district="Dhaka",
+            address="Motijheel C/A",
+            is_active=True,
+        )
+
+        # Manager A (Branch A)
+        self.manager_a = User.objects.create_user(
+            username="manager_agrabad",
+            password="ManagerPass123!",
+            first_name="Fatema",
+            last_name="Manager",
+        )
+        self.manager_a.groups.add(self.manager_group)
+        StaffProfile.objects.create(
+            user=self.manager_a,
+            employee_id="EMP_MGR_A",
+            branch=self.branch_a,
+            designation="Branch Manager",
+            is_active=True,
+        )
+
+        # Teller A (Branch A)
+        self.teller_a = User.objects.create_user(
+            username="teller_agrabad",
+            password="TellerPass123!",
+            first_name="Rafiq",
+            last_name="Teller",
+        )
+        self.teller_a.groups.add(self.teller_group)
+        StaffProfile.objects.create(
+            user=self.teller_a,
+            employee_id="EMP_TEL_A",
+            branch=self.branch_a,
+            designation="Teller Officer",
+            is_active=True,
+        )
+
+        # Teller B (Branch B)
+        self.teller_b = User.objects.create_user(
+            username="teller_motijheel",
+            password="TellerPass123!",
+            first_name="Kamal",
+            last_name="Teller",
+        )
+        self.teller_b.groups.add(self.teller_group)
+        StaffProfile.objects.create(
+            user=self.teller_b,
+            employee_id="EMP_TEL_B",
+            branch=self.branch_b,
+            designation="Teller Officer",
+            is_active=True,
+        )
+
+        # Product
+        self.product = AccountProduct.objects.create(
+            product_code="SAV500",
+            product_name="Savings Phase 5",
+            product_type=AccountProduct.ProductType.SAVINGS,
+            minimum_balance=Decimal("500.00"),
+            currency="BDT",
+        )
+
+        # Customer & Account A (Branch A)
+        self.customer_a = Customer.objects.create(
+            full_name="Agrabad Customer",
+            phone="01711111190",
+            nid_number="NID5001",
+            present_address="Chittagong",
+            district="Chittagong",
+            home_branch=self.branch_a,
+            created_by=self.teller_a,
+        )
+        self.account_a = Account.objects.create(
+            customer=self.customer_a,
+            product=self.product,
+            branch=self.branch_a,
+            available_balance=Decimal("10000.00"),
+            ledger_balance=Decimal("10000.00"),
+        )
+
+        # Customer & Account B (Branch B)
+        self.customer_b = Customer.objects.create(
+            full_name="Motijheel Customer",
+            phone="01711111191",
+            nid_number="NID5002",
+            present_address="Dhaka",
+            district="Dhaka",
+            home_branch=self.branch_b,
+            created_by=self.teller_b,
+        )
+        self.account_b = Account.objects.create(
+            customer=self.customer_b,
+            product=self.product,
+            branch=self.branch_b,
+            available_balance=Decimal("20000.00"),
+            ledger_balance=Decimal("20000.00"),
+        )
+
+    def test_manager_sees_pending_transactions_from_own_branch(self):
+        from transactions.services.deposit_service import deposit
+        txn_a = deposit(
+            account=self.account_a,
+            amount=Decimal("5000.00"),
+            created_by=self.teller_a,
+            description="Branch A pending deposit",
+        )
+
+        self.client.login(username="manager_agrabad", password="ManagerPass123!")
+        response = self.client.get("/dashboard/manager/")
+        self.assertEqual(response.status_code, 200)
+
+        # Check pending transactions in context
+        pending_list = list(response.context["pending_transactions"])
+        self.assertIn(txn_a, pending_list)
+        self.assertEqual(response.context["pending_count"], 1)
+
+        # Check details displayed in HTML
+        self.assertContains(response, txn_a.transaction_id)
+        self.assertContains(response, "5000.00")
+        self.assertContains(response, "teller_agrabad")
+
+    def test_manager_cannot_see_other_branch_transactions(self):
+        from transactions.services.deposit_service import deposit
+        # Pending deposit in branch A
+        txn_a = deposit(
+            account=self.account_a,
+            amount=Decimal("3000.00"),
+            created_by=self.teller_a,
+            description="Branch A deposit",
+        )
+        # Pending deposit in branch B
+        txn_b = deposit(
+            account=self.account_b,
+            amount=Decimal("7000.00"),
+            created_by=self.teller_b,
+            description="Branch B deposit",
+        )
+
+        self.client.login(username="manager_agrabad", password="ManagerPass123!")
+        response = self.client.get("/dashboard/manager/")
+        self.assertEqual(response.status_code, 200)
+
+        pending_list = list(response.context["pending_transactions"])
+        self.assertIn(txn_a, pending_list)
+        self.assertNotIn(txn_b, pending_list)
+        self.assertEqual(response.context["pending_count"], 1)
+        self.assertNotContains(response, txn_b.transaction_id)
+
+    def test_manager_can_approve_from_dashboard(self):
+        from transactions.services.deposit_service import deposit
+        txn_a = deposit(
+            account=self.account_a,
+            amount=Decimal("4000.00"),
+            created_by=self.teller_a,
+            description="Deposit to approve",
+        )
+        self.assertEqual(txn_a.authorization_status, Transaction.AuthorizationStatus.PENDING)
+
+        self.client.login(username="manager_agrabad", password="ManagerPass123!")
+        response = self.client.post(f"/dashboard/manager/approve/{txn_a.id}/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/dashboard/manager/", response.url)
+
+        txn_a.refresh_from_db()
+        self.assertEqual(txn_a.authorization_status, Transaction.AuthorizationStatus.APPROVED)
+        self.assertEqual(txn_a.status, Transaction.Status.POSTED)
+        self.assertEqual(txn_a.approved_by, self.manager_a)
+
+        self.account_a.refresh_from_db()
+        self.assertEqual(self.account_a.available_balance, Decimal("14000.00"))
+
+    def test_manager_can_reject_from_dashboard(self):
+        from transactions.services.deposit_service import deposit
+        txn_a = deposit(
+            account=self.account_a,
+            amount=Decimal("2500.00"),
+            created_by=self.teller_a,
+            description="Deposit to reject",
+        )
+        self.assertEqual(txn_a.authorization_status, Transaction.AuthorizationStatus.PENDING)
+
+        self.client.login(username="manager_agrabad", password="ManagerPass123!")
+        response = self.client.post(
+            f"/dashboard/manager/reject/{txn_a.id}/",
+            data={"rejection_reason": "Incomplete documentation"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/dashboard/manager/", response.url)
+
+        txn_a.refresh_from_db()
+        self.assertEqual(txn_a.authorization_status, Transaction.AuthorizationStatus.REJECTED)
+        self.assertEqual(txn_a.status, Transaction.Status.REJECTED)
+        self.assertEqual(txn_a.approved_by, self.manager_a)
+        self.assertEqual(txn_a.rejection_reason, "Incomplete documentation")
+
+        # Balance remains unchanged
+        self.account_a.refresh_from_db()
+        self.assertEqual(self.account_a.available_balance, Decimal("10000.00"))
+
+    def test_teller_cannot_access_approval_actions(self):
+        from transactions.services.deposit_service import deposit
+        txn_a = deposit(
+            account=self.account_a,
+            amount=Decimal("1500.00"),
+            created_by=self.teller_a,
+            description="Deposit attempt teller approval",
+        )
+
+        self.client.login(username="teller_agrabad", password="TellerPass123!")
+
+        # Attempt approve -> 403 Forbidden
+        response_approve = self.client.post(f"/dashboard/manager/approve/{txn_a.id}/")
+        self.assertEqual(response_approve.status_code, 403)
+
+        # Attempt reject -> 403 Forbidden
+        response_reject = self.client.post(
+            f"/dashboard/manager/reject/{txn_a.id}/",
+            data={"rejection_reason": "Unauthorized reject attempt"},
+        )
+        self.assertEqual(response_reject.status_code, 403)
+
+        # Ensure transaction is still pending
+        txn_a.refresh_from_db()
+        self.assertEqual(txn_a.authorization_status, Transaction.AuthorizationStatus.PENDING)
+
+    def test_manager_cannot_approve_other_branch_transaction(self):
+        from transactions.services.deposit_service import deposit
+        txn_b = deposit(
+            account=self.account_b,
+            amount=Decimal("2000.00"),
+            created_by=self.teller_b,
+            description="Branch B deposit",
+        )
+
+        self.client.login(username="manager_agrabad", password="ManagerPass123!")
+        response = self.client.post(f"/dashboard/manager/approve/{txn_b.id}/")
+        self.assertEqual(response.status_code, 403)
+
+        txn_b.refresh_from_db()
+        self.assertEqual(txn_b.authorization_status, Transaction.AuthorizationStatus.PENDING)
+
+    def test_manager_cannot_reject_other_branch_transaction(self):
+        from transactions.services.deposit_service import deposit
+        txn_b = deposit(
+            account=self.account_b,
+            amount=Decimal("2000.00"),
+            created_by=self.teller_b,
+            description="Branch B deposit",
+        )
+
+        self.client.login(username="manager_agrabad", password="ManagerPass123!")
+        response = self.client.post(
+            f"/dashboard/manager/reject/{txn_b.id}/",
+            data={"rejection_reason": "Cross branch attempt"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+        txn_b.refresh_from_db()
+        self.assertEqual(txn_b.authorization_status, Transaction.AuthorizationStatus.PENDING)
+
