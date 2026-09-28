@@ -1,8 +1,18 @@
+from decimal import Decimal
 from django.test import TestCase
 from django.contrib.auth.models import User, Group
 from django.db.utils import IntegrityError
 from branches.models import Branch
 from users.models import StaffProfile
+from customers.models import Customer
+from products.models import AccountProduct
+from accounts.models import Account
+from transactions.models import Transaction
+from users.services.branch_permission import (
+    get_user_branch,
+    can_access_account,
+    can_approve_transaction,
+)
 
 
 class StaffProfileModelTest(TestCase):
@@ -66,3 +76,224 @@ class StaffProfileModelTest(TestCase):
                 Group.objects.filter(name=role_name).exists(),
                 f"Group '{role_name}' does not exist.",
             )
+
+
+class BranchPermissionServiceTest(TestCase):
+    def setUp(self):
+        # Branches
+        self.branch_a = Branch.objects.create(
+            branch_code="BR001",
+            branch_name="Dhaka Main Branch",
+            district="Dhaka",
+            address="Motijheel C/A",
+        )
+        self.branch_b = Branch.objects.create(
+            branch_code="BR002",
+            branch_name="Chittagong Branch",
+            district="Chittagong",
+            address="Agrabad C/A",
+        )
+        self.inactive_branch = Branch.objects.create(
+            branch_code="BR003",
+            branch_name="Closed Branch",
+            district="Sylhet",
+            address="Zindabazar",
+            is_active=False,
+        )
+
+        # Groups
+        self.manager_group, _ = Group.objects.get_or_create(name='Manager')
+        self.officer_group, _ = Group.objects.get_or_create(name='Officer')
+
+        # Superuser
+        self.superuser = User.objects.create_superuser(
+            username="admin_user",
+            email="admin@agranicbs.com",
+            password="Password123!",
+        )
+
+        # Staff in Branch A
+        self.staff_a = User.objects.create_user(
+            username="staff_a",
+            password="Password123!",
+        )
+        self.profile_a = StaffProfile.objects.create(
+            user=self.staff_a,
+            employee_id="EMP_A",
+            branch=self.branch_a,
+            is_active=True,
+        )
+
+        # Manager in Branch A
+        self.manager_a = User.objects.create_user(
+            username="manager_a",
+            password="Password123!",
+        )
+        self.manager_a.groups.add(self.manager_group)
+        self.profile_mgr_a = StaffProfile.objects.create(
+            user=self.manager_a,
+            employee_id="EMP_MGR_A",
+            branch=self.branch_a,
+            is_active=True,
+        )
+
+        # Manager in Branch B
+        self.manager_b = User.objects.create_user(
+            username="manager_b",
+            password="Password123!",
+        )
+        self.manager_b.groups.add(self.manager_group)
+        self.profile_mgr_b = StaffProfile.objects.create(
+            user=self.manager_b,
+            employee_id="EMP_MGR_B",
+            branch=self.branch_b,
+            is_active=True,
+        )
+
+        # Inactive staff
+        self.inactive_user = User.objects.create_user(
+            username="inactive_user",
+            password="Password123!",
+            is_active=False,
+        )
+        StaffProfile.objects.create(
+            user=self.inactive_user,
+            employee_id="EMP_INACTIVE",
+            branch=self.branch_a,
+            is_active=True,
+        )
+
+        # Staff with inactive profile
+        self.user_inactive_profile = User.objects.create_user(
+            username="user_inactive_profile",
+            password="Password123!",
+        )
+        StaffProfile.objects.create(
+            user=self.user_inactive_profile,
+            employee_id="EMP_INACT_PROF",
+            branch=self.branch_a,
+            is_active=False,
+        )
+
+        # Staff in inactive branch
+        self.user_in_inactive_branch = User.objects.create_user(
+            username="user_in_inactive_branch",
+            password="Password123!",
+        )
+        StaffProfile.objects.create(
+            user=self.user_in_inactive_branch,
+            employee_id="EMP_INACT_BR",
+            branch=self.inactive_branch,
+            is_active=True,
+        )
+
+        # User without staff profile
+        self.plain_user = User.objects.create_user(
+            username="plain_user",
+            password="Password123!",
+        )
+
+        # Customer & Product & Accounts
+        self.product = AccountProduct.objects.create(
+            product_code="SAV01",
+            product_name="Standard Savings",
+            product_type=AccountProduct.ProductType.SAVINGS,
+            minimum_balance=Decimal("500.00"),
+            currency="BDT",
+        )
+
+        self.customer_a = Customer.objects.create(
+            full_name="Customer Branch A",
+            phone="01711111112",
+            nid_number="NID10001",
+            present_address="Dhaka",
+            district="Dhaka",
+            home_branch=self.branch_a,
+            created_by=self.staff_a,
+        )
+        self.account_a = Account.objects.create(
+            customer=self.customer_a,
+            product=self.product,
+            branch=self.branch_a,
+            available_balance=Decimal("10000.00"),
+            ledger_balance=Decimal("10000.00"),
+        )
+
+        self.customer_b = Customer.objects.create(
+            full_name="Customer Branch B",
+            phone="01711111113",
+            nid_number="NID10002",
+            present_address="Chittagong",
+            district="Chittagong",
+            home_branch=self.branch_b,
+            created_by=self.manager_b,
+        )
+        self.account_b = Account.objects.create(
+            customer=self.customer_b,
+            product=self.product,
+            branch=self.branch_b,
+            available_balance=Decimal("20000.00"),
+            ledger_balance=Decimal("20000.00"),
+        )
+
+        # Transactions
+        self.txn_a = Transaction.objects.create(
+            transaction_type=Transaction.TransactionType.DEPOSIT,
+            account=self.account_a,
+            amount=Decimal("1000.00"),
+            created_by=self.staff_a,
+        )
+
+    def test_get_user_branch_valid_staff(self):
+        self.assertEqual(get_user_branch(self.staff_a), self.branch_a)
+        self.assertEqual(get_user_branch(self.manager_b), self.branch_b)
+
+    def test_get_user_branch_none_or_unauthenticated(self):
+        self.assertIsNone(get_user_branch(None))
+
+    def test_get_user_branch_user_without_profile(self):
+        self.assertIsNone(get_user_branch(self.plain_user))
+        self.assertIsNone(get_user_branch(self.superuser))
+
+    def test_get_user_branch_inactive_user_or_profile_or_branch(self):
+        self.assertIsNone(get_user_branch(self.inactive_user))
+        self.assertIsNone(get_user_branch(self.user_inactive_profile))
+        self.assertIsNone(get_user_branch(self.user_in_inactive_branch))
+
+    def test_can_access_account_superuser_bypass(self):
+        self.assertTrue(can_access_account(self.superuser, self.account_a))
+        self.assertTrue(can_access_account(self.superuser, self.account_b))
+
+    def test_can_access_account_same_branch(self):
+        self.assertTrue(can_access_account(self.staff_a, self.account_a))
+        self.assertTrue(can_access_account(self.manager_a, self.account_a))
+        self.assertTrue(can_access_account(self.manager_b, self.account_b))
+
+    def test_can_access_account_different_branch(self):
+        self.assertFalse(can_access_account(self.staff_a, self.account_b))
+        self.assertFalse(can_access_account(self.manager_a, self.account_b))
+        self.assertFalse(can_access_account(self.manager_b, self.account_a))
+
+    def test_can_access_account_invalid_inputs(self):
+        self.assertFalse(can_access_account(None, self.account_a))
+        self.assertFalse(can_access_account(self.staff_a, None))
+        self.assertFalse(can_access_account(self.plain_user, self.account_a))
+        self.assertFalse(can_access_account(self.inactive_user, self.account_a))
+
+    def test_can_approve_transaction_superuser_bypass(self):
+        self.assertTrue(can_approve_transaction(self.superuser, self.txn_a))
+
+    def test_can_approve_transaction_manager_same_branch(self):
+        self.assertTrue(can_approve_transaction(self.manager_a, self.txn_a))
+
+    def test_can_approve_transaction_manager_different_branch(self):
+        self.assertFalse(can_approve_transaction(self.manager_b, self.txn_a))
+
+    def test_can_approve_transaction_non_manager(self):
+        # staff_a is in Branch A but not in Manager group
+        self.assertFalse(can_approve_transaction(self.staff_a, self.txn_a))
+
+    def test_can_approve_transaction_invalid_inputs(self):
+        self.assertFalse(can_approve_transaction(None, self.txn_a))
+        self.assertFalse(can_approve_transaction(self.manager_a, None))
+        self.assertFalse(can_approve_transaction(self.inactive_user, self.txn_a))
