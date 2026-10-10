@@ -953,3 +953,208 @@ class ManagerApprovalDashboardTest(TestCase):
         txn_b.refresh_from_db()
         self.assertEqual(txn_b.authorization_status, Transaction.AuthorizationStatus.PENDING)
 
+
+# =============================================================================
+# Phase 1 — Teller Cash Deposit Integration Tests
+# =============================================================================
+
+class TellerDepositDashboardTest(TestCase):
+    """
+    Tests for Teller Cash Deposit endpoint (/dashboard/teller/deposit/).
+
+    Verifies:
+    - Valid deposit creates PENDING transaction and leaves balances unchanged.
+    - Deposit cannot be made for an account in a different branch.
+    - Invalid account numbers or non-numeric/negative amounts set error message cleanly.
+    - Non-Teller roles (Manager, Auditor) are denied with HTTP 403.
+    - Unauthenticated requests redirect to /login/.
+    - GET method returns 405 Method Not Allowed.
+    """
+
+    def setUp(self):
+        self.branch_a = Branch.objects.create(
+            branch_code="BR601",
+            branch_name="Motijheel Branch",
+            district="Dhaka",
+            address="Motijheel C/A",
+            is_active=True,
+        )
+        self.branch_b = Branch.objects.create(
+            branch_code="BR602",
+            branch_name="Agrabad Branch",
+            district="Chittagong",
+            address="Agrabad C/A",
+            is_active=True,
+        )
+
+        self.teller_group, _ = Group.objects.get_or_create(name="Teller")
+        self.manager_group, _ = Group.objects.get_or_create(name="Manager")
+
+        # Teller in Branch A
+        self.teller_user = User.objects.create_user(
+            username="teller_dhaka",
+            password="TellerPassword123!",
+            first_name="Tariq",
+            last_name="Islam",
+        )
+        self.teller_user.groups.add(self.teller_group)
+        StaffProfile.objects.create(
+            user=self.teller_user,
+            employee_id="EMP_TEL_DHAKA",
+            branch=self.branch_a,
+            designation="Cash Teller",
+            is_active=True,
+        )
+
+        # Manager in Branch A
+        self.manager_user = User.objects.create_user(
+            username="manager_dhaka",
+            password="ManagerPassword123!",
+        )
+        self.manager_user.groups.add(self.manager_group)
+        StaffProfile.objects.create(
+            user=self.manager_user,
+            employee_id="EMP_MGR_DHAKA",
+            branch=self.branch_a,
+            designation="Branch Manager",
+            is_active=True,
+        )
+
+        # Account Product
+        self.product = AccountProduct.objects.create(
+            product_code="SAV600",
+            product_name="Savings Account",
+            product_type=AccountProduct.ProductType.SAVINGS,
+            minimum_balance=Decimal("500.00"),
+            currency="BDT",
+        )
+
+        # Customer & Account in Branch A
+        self.customer_a = Customer.objects.create(
+            full_name="Dhaka Customer",
+            phone="01700000001",
+            nid_number="NID6001",
+            present_address="Dhaka",
+            district="Dhaka",
+            home_branch=self.branch_a,
+            created_by=self.teller_user,
+        )
+        self.account_a = Account.objects.create(
+            customer=self.customer_a,
+            product=self.product,
+            branch=self.branch_a,
+            account_number="AC60001",
+            available_balance=Decimal("5000.00"),
+            ledger_balance=Decimal("5000.00"),
+        )
+
+        # Customer & Account in Branch B
+        self.customer_b = Customer.objects.create(
+            full_name="Chittagong Customer",
+            phone="01700000002",
+            nid_number="NID6002",
+            present_address="Chittagong",
+            district="Chittagong",
+            home_branch=self.branch_b,
+            created_by=self.teller_user,
+        )
+        self.account_b = Account.objects.create(
+            customer=self.customer_b,
+            product=self.product,
+            branch=self.branch_b,
+            account_number="AC60002",
+            available_balance=Decimal("10000.00"),
+            ledger_balance=Decimal("10000.00"),
+        )
+
+    def test_teller_can_create_deposit_successfully(self):
+        self.client.login(username="teller_dhaka", password="TellerPassword123!")
+        response = self.client.post("/dashboard/teller/deposit/", {
+            "account_number": "AC60001",
+            "amount": "2500.50",
+            "description": "Counter Cash Deposit",
+        })
+        # Should redirect back to dashboard
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "/dashboard/teller/")
+
+        # Verify transaction created in DB
+        txn = Transaction.objects.get(account=self.account_a)
+        self.assertEqual(txn.amount, Decimal("2500.50"))
+        self.assertEqual(txn.transaction_type, Transaction.TransactionType.DEPOSIT)
+        self.assertEqual(txn.authorization_status, Transaction.AuthorizationStatus.PENDING)
+        self.assertEqual(txn.status, Transaction.Status.PENDING)
+        self.assertEqual(txn.created_by, self.teller_user)
+
+        # Verify account balances remain UNCHANGED until Manager approval
+        self.account_a.refresh_from_db()
+        self.assertEqual(self.account_a.available_balance, Decimal("5000.00"))
+        self.assertEqual(self.account_a.ledger_balance, Decimal("5000.00"))
+
+    def test_teller_cannot_deposit_to_different_branch_account(self):
+        self.client.login(username="teller_dhaka", password="TellerPassword123!")
+        response = self.client.post("/dashboard/teller/deposit/", {
+            "account_number": "AC60002",  # Branch B account
+            "amount": "1000.00",
+            "description": "Cross branch deposit attempt",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        # Ensure transaction was NOT created
+        self.assertFalse(Transaction.objects.filter(account=self.account_b).exists())
+
+        # Ensure balance unchanged
+        self.account_b.refresh_from_db()
+        self.assertEqual(self.account_b.available_balance, Decimal("10000.00"))
+
+    def test_teller_deposit_nonexistent_account_shows_error(self):
+        self.client.login(username="teller_dhaka", password="TellerPassword123!")
+        response = self.client.post("/dashboard/teller/deposit/", {
+            "account_number": "AC99999",
+            "amount": "1000.00",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_teller_deposit_invalid_amount_format(self):
+        self.client.login(username="teller_dhaka", password="TellerPassword123!")
+        response = self.client.post("/dashboard/teller/deposit/", {
+            "account_number": "AC60001",
+            "amount": "abc_invalid",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_teller_deposit_negative_amount_fails(self):
+        self.client.login(username="teller_dhaka", password="TellerPassword123!")
+        response = self.client.post("/dashboard/teller/deposit/", {
+            "account_number": "AC60001",
+            "amount": "-500.00",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_non_teller_denied_access_to_deposit_endpoint(self):
+        self.client.login(username="manager_dhaka", password="ManagerPassword123!")
+        response = self.client.post("/dashboard/teller/deposit/", {
+            "account_number": "AC60001",
+            "amount": "1000.00",
+        })
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_unauthenticated_user_redirected(self):
+        response = self.client.post("/dashboard/teller/deposit/", {
+            "account_number": "AC60001",
+            "amount": "1000.00",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response.url)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_get_method_returns_method_not_allowed(self):
+        self.client.login(username="teller_dhaka", password="TellerPassword123!")
+        response = self.client.get("/dashboard/teller/deposit/")
+        self.assertEqual(response.status_code, 405)
+
+

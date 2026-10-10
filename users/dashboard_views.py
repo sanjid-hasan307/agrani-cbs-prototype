@@ -18,8 +18,11 @@ from django.core.exceptions import ValidationError
 from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
 
+from decimal import Decimal, InvalidOperation
+from accounts.models import Account
 from transactions.models import Transaction
 from transactions.services.authorization_service import approve_transaction, reject_transaction
+from transactions.services.deposit_service import deposit
 from users.views import get_user_role, get_user_staff_info
 
 
@@ -166,6 +169,58 @@ def teller_dashboard(request: HttpRequest) -> HttpResponse:
         'branch': branch,
     }
     return render(request, 'users/dashboard_teller.html', context)
+
+
+@_role_required('Teller')
+def teller_deposit(request: HttpRequest) -> HttpResponse:
+    """
+    Teller Cash Deposit POST View — /dashboard/teller/deposit/
+    Creates a PENDING cash deposit transaction requiring Manager approval.
+    """
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+
+    account_number = request.POST.get('account_number', '').strip()
+    amount_raw = request.POST.get('amount', '').strip()
+    description = request.POST.get('description', '').strip()
+
+    if not account_number or not amount_raw:
+        messages.error(request, "Account number and deposit amount are required.")
+        return redirect('dashboard_teller')
+
+    try:
+        amount = Decimal(amount_raw)
+    except (InvalidOperation, ValueError):
+        messages.error(request, "Invalid deposit amount. Please enter a valid decimal number.")
+        return redirect('dashboard_teller')
+
+    try:
+        account = Account.objects.get(account_number=account_number)
+    except Account.DoesNotExist:
+        messages.error(request, f"Account '{account_number}' not found.")
+        return redirect('dashboard_teller')
+
+    try:
+        txn = deposit(
+            account=account,
+            amount=amount,
+            created_by=request.user,
+            description=description,
+        )
+        messages.success(
+            request,
+            f"Deposit transaction {txn.transaction_id} initiated successfully. "
+            f"Status is PENDING and requires Manager approval."
+        )
+    except ValidationError as e:
+        err_msg = e.message if hasattr(e, 'message') else str(e)
+        if hasattr(e, 'message_dict') and isinstance(e.message_dict, dict):
+            err_msg = "; ".join([f"{', '.join(v)}" for k, v in e.message_dict.items()])
+        messages.error(request, f"Deposit failed: {err_msg}")
+    except Exception as e:
+        messages.error(request, f"Deposit failed: {str(e)}")
+
+    return redirect('dashboard_teller')
 
 
 @_role_required('Auditor')
