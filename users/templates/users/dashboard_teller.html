@@ -93,12 +93,12 @@
                     </div>
                     <!-- Fund Transfer Placeholder -->
                     <div class="col-sm-4">
-                        <div class="card action-card disabled-card text-center" style="border-top: 4px solid #3b82f6;" title="Coming soon">
+                        <div class="card action-card active-card text-center" style="border-top: 4px solid #3b82f6;" data-bs-toggle="modal" data-bs-target="#transferModal">
                             <div class="card-body">
                                 <div class="action-icon mb-2">&#128260;</div>
                                 <div class="fw-semibold text-dark">Fund Transfer</div>
                                 <p class="text-muted small mb-0">Transfer between accounts</p>
-                                <span class="badge bg-secondary mt-2">Coming Soon</span>
+                                <span class="badge bg-primary mt-2">Active</span>
                             </div>
                         </div>
                     </div>
@@ -177,7 +177,42 @@
             </div>
         </div>
     </div>
-
+    <!-- Fund Transfer Modal Form -->
+    <div class="modal fade" id="transferModal" tabindex="-1" aria-labelledby="transferModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header" style="background-color: #f8fafc;">
+                    <h5 class="modal-title fw-bold fs-6 text-dark" id="transferModalLabel">Fund Transfer Request</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form action="{% url 'teller_transfer' %}" method="POST" id="form-fund-transfer">
+                    {% csrf_token %}
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="transfer_from_account" class="form-label small fw-semibold">Sender Account Number <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control form-control-sm" id="transfer_from_account" name="from_account_number" placeholder="Enter sender account number" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="transfer_to_account" class="form-label small fw-semibold">Receiver Account Number <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control form-control-sm" id="transfer_to_account" name="to_account_number" placeholder="Enter receiver account number" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="transfer_amount" class="form-label small fw-semibold">Transfer Amount (BDT) <span class="text-danger">*</span></label>
+                        <input type="number" class="form-control form-control-sm" id="transfer_amount" name="amount" step="0.01" min="0.01" placeholder="0.00" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="transfer_description" class="form-label small fw-semibold">Description / Remarks</label>
+                        <input type="text" class="form-control form-control-sm" id="transfer_description" name="description" placeholder="Optional transfer remarks">
+                    </div>
+            </div>
+            <div class="modal-footer bg-light">
+                 <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                 <button type="submit" form="form-fund-transfer" class="btn btn-primary btn-sm">Submit Fund Transfer</button>
+            </div>
+            </form>
+          </div>
+        </div>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

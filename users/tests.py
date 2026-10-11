@@ -8,7 +8,7 @@ from customers.models import Customer
 from products.models import AccountProduct
 from accounts.models import Account
 from audit.models import AuditLog
-from transactions.models import Transaction
+from transactions.models import Transaction, TransactionEntry
 from users.services.branch_permission import (
     get_user_branch,
     can_access_account,
@@ -956,6 +956,288 @@ class ManagerApprovalDashboardTest(TestCase):
 
 
 # =============================================================================
+# Phase 3 — Teller Fund Transfer Integration Tests
+# =============================================================================
+
+class TellerTransferDashboardTest(TestCase):
+    """Tests for Teller fund transfer initiation and endpoint access controls."""
+
+    def setUp(self):
+        self.branch_a = Branch.objects.create(
+            branch_code="BR801",
+            branch_name="Motijheel Branch",
+            district="Dhaka",
+            address="Motijheel C/A",
+            is_active=True,
+        )
+        self.branch_b = Branch.objects.create(
+            branch_code="BR802",
+            branch_name="Agrabad Branch",
+            district="Chittagong",
+            address="Agrabad C/A",
+            is_active=True,
+        )
+
+        self.teller_group, _ = Group.objects.get_or_create(name="Teller")
+        self.manager_group, _ = Group.objects.get_or_create(name="Manager")
+        self.auditor_group, _ = Group.objects.get_or_create(name="Auditor")
+
+        self.teller_user = User.objects.create_user(
+            username="teller_transfer",
+            password="TellerTransfer123!",
+        )
+        self.teller_user.groups.add(self.teller_group)
+        StaffProfile.objects.create(
+            user=self.teller_user,
+            employee_id="EMP_TEL_TRANSFER",
+            branch=self.branch_a,
+            designation="Cash Teller",
+            is_active=True,
+        )
+
+        self.manager_user = User.objects.create_user(
+            username="manager_transfer",
+            password="ManagerTransfer123!",
+        )
+        self.manager_user.groups.add(self.manager_group)
+        StaffProfile.objects.create(
+            user=self.manager_user,
+            employee_id="EMP_MGR_TRANSFER",
+            branch=self.branch_a,
+            designation="Branch Manager",
+            is_active=True,
+        )
+
+        self.auditor_user = User.objects.create_user(
+            username="auditor_transfer",
+            password="AuditorTransfer123!",
+        )
+        self.auditor_user.groups.add(self.auditor_group)
+        StaffProfile.objects.create(
+            user=self.auditor_user,
+            employee_id="EMP_AUD_TRANSFER",
+            branch=self.branch_a,
+            designation="Auditor",
+            is_active=True,
+        )
+
+        self.product = AccountProduct.objects.create(
+            product_code="SAV800",
+            product_name="Transfer Savings Account",
+            product_type=AccountProduct.ProductType.SAVINGS,
+            minimum_balance=Decimal("500.00"),
+            currency="BDT",
+        )
+
+        self.customer_a = Customer.objects.create(
+            full_name="Dhaka Transfer Customer",
+            phone="01700000801",
+            nid_number="NID8001",
+            present_address="Dhaka",
+            district="Dhaka",
+            home_branch=self.branch_a,
+            created_by=self.teller_user,
+        )
+        self.account_a = Account.objects.create(
+            customer=self.customer_a,
+            product=self.product,
+            branch=self.branch_a,
+            account_number="AC80001",
+            available_balance=Decimal("5000.00"),
+            ledger_balance=Decimal("5000.00"),
+        )
+
+        self.customer_b = Customer.objects.create(
+            full_name="Chittagong Transfer Customer",
+            phone="01700000802",
+            nid_number="NID8002",
+            present_address="Chittagong",
+            district="Chittagong",
+            home_branch=self.branch_b,
+            created_by=self.teller_user,
+        )
+        self.account_b = Account.objects.create(
+            customer=self.customer_b,
+            product=self.product,
+            branch=self.branch_b,
+            account_number="AC80002",
+            available_balance=Decimal("10000.00"),
+            ledger_balance=Decimal("10000.00"),
+        )
+
+    def post_transfer(self, from_account="AC80001", to_account="AC80002", amount="1000.00"):
+        return self.client.post("/dashboard/teller/transfer/", {
+            "from_account_number": from_account,
+            "to_account_number": to_account,
+            "amount": amount,
+            "description": "Teller transfer test",
+        })
+
+    def test_valid_transfer_creates_pending_transaction(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        response = self.post_transfer(amount="1250.50")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "/dashboard/teller/")
+        txn = Transaction.objects.get(account=self.account_a)
+        self.assertEqual(txn.amount, Decimal("1250.50"))
+        self.assertEqual(txn.transaction_type, Transaction.TransactionType.TRANSFER)
+        self.assertEqual(txn.status, Transaction.Status.PENDING)
+        self.assertEqual(txn.authorization_status, Transaction.AuthorizationStatus.PENDING)
+        self.assertEqual(txn.created_by, self.teller_user)
+
+    def test_transfer_leaves_both_balances_unchanged_before_approval(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        self.post_transfer(amount="1250.50")
+
+        self.account_a.refresh_from_db()
+        self.account_b.refresh_from_db()
+        self.assertEqual(self.account_a.available_balance, Decimal("5000.00"))
+        self.assertEqual(self.account_a.ledger_balance, Decimal("5000.00"))
+        self.assertEqual(self.account_b.available_balance, Decimal("10000.00"))
+        self.assertEqual(self.account_b.ledger_balance, Decimal("10000.00"))
+
+    def test_transfer_entries_debit_sender_and_credit_receiver(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        self.post_transfer(amount="1250.50")
+
+        txn = Transaction.objects.get(account=self.account_a)
+        entries = {
+            entry.entry_type: entry
+            for entry in TransactionEntry.objects.filter(transaction=txn)
+        }
+        self.assertEqual(set(entries), {
+            TransactionEntry.EntryType.DEBIT,
+            TransactionEntry.EntryType.CREDIT,
+        })
+        self.assertEqual(entries[TransactionEntry.EntryType.DEBIT].account, self.account_a)
+        self.assertEqual(entries[TransactionEntry.EntryType.CREDIT].account, self.account_b)
+        self.assertEqual(entries[TransactionEntry.EntryType.DEBIT].amount, Decimal("1250.50"))
+        self.assertEqual(entries[TransactionEntry.EntryType.CREDIT].amount, Decimal("1250.50"))
+
+    def test_successful_transfer_records_create_transfer_audit_log(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        self.post_transfer()
+
+        txn = Transaction.objects.get(account=self.account_a)
+        self.assertTrue(AuditLog.objects.filter(
+            user=self.teller_user,
+            action="CREATE_TRANSFER",
+            object_id=txn.transaction_id,
+        ).exists())
+
+    def test_transfer_with_insufficient_sender_balance_is_rejected(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        response = self.post_transfer(amount="5000.01")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Transaction.objects.count(), 0)
+        self.account_a.refresh_from_db()
+        self.assertEqual(self.account_a.available_balance, Decimal("5000.00"))
+
+    def test_transfer_to_same_account_is_rejected(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        response = self.post_transfer(to_account="AC80001")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_transfer_with_nonexistent_sender_or_receiver_is_rejected(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        for from_account, to_account in (
+            ("AC99998", "AC80002"),
+            ("AC80001", "AC99999"),
+        ):
+            with self.subTest(from_account=from_account, to_account=to_account):
+                response = self.post_transfer(
+                    from_account=from_account,
+                    to_account=to_account,
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_invalid_transfer_amounts_are_rejected(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        for amount in ("0", "-1.00", "NaN", "Infinity", "100.001"):
+            with self.subTest(amount=amount):
+                response = self.post_transfer(amount=amount)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_teller_cannot_transfer_from_unauthorized_source_branch(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        response = self.post_transfer(from_account="AC80002", to_account="AC80001")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_teller_can_transfer_to_receiver_in_another_branch(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        response = self.post_transfer(to_account="AC80002")
+
+        self.assertEqual(response.status_code, 302)
+        txn = Transaction.objects.get(account=self.account_a)
+        self.assertEqual(txn.status, Transaction.Status.PENDING)
+        self.assertTrue(txn.entries.filter(
+            account=self.account_b,
+            entry_type=TransactionEntry.EntryType.CREDIT,
+        ).exists())
+
+    def test_manager_and_auditor_are_denied_transfer_access(self):
+        for user, password in (
+            (self.manager_user, "ManagerTransfer123!"),
+            (self.auditor_user, "AuditorTransfer123!"),
+        ):
+            with self.subTest(username=user.username):
+                self.client.login(username=user.username, password=password)
+                response = self.post_transfer()
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(Transaction.objects.count(), 0)
+                self.client.logout()
+
+    def test_unauthenticated_transfer_request_redirects_to_login(self):
+        response = self.post_transfer()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response.url)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_get_transfer_request_returns_method_not_allowed(self):
+        self.client.login(username="teller_transfer", password="TellerTransfer123!")
+
+        response = self.client.get("/dashboard/teller/transfer/")
+
+        self.assertEqual(response.status_code, 405)
+
+    def test_transfer_endpoint_enforces_csrf(self):
+        from django.test import Client
+
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.login(username="teller_transfer", password="TellerTransfer123!")
+        response = csrf_client.post(
+            "/dashboard/teller/transfer/",
+            data={
+                "from_account_number": "AC80001",
+                "to_account_number": "AC80002",
+                "amount": "1000.00",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+
+# =============================================================================
 # Phase 1 — Teller Cash Deposit Integration Tests
 # =============================================================================
 
@@ -1412,6 +1694,4 @@ class TellerWithdrawDashboardTest(TestCase):
             content_type="application/x-www-form-urlencoded",
         )
         self.assertEqual(response.status_code, 403)
-
-
 

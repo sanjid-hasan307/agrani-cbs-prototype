@@ -7,6 +7,7 @@ from users.dashboard_views import (
     teller_dashboard,
     teller_deposit,
     teller_withdraw,
+    teller_transfer,
     auditor_dashboard,
 )
 
@@ -19,5 +20,6 @@ urlpatterns = [
     path('dashboard/teller/', teller_dashboard, name='dashboard_teller'),
     path('dashboard/teller/deposit/', teller_deposit, name='teller_deposit'),
     path('dashboard/teller/withdraw/', teller_withdraw, name='teller_withdraw'),
+    path('dashboard/teller/transfer/', teller_transfer, name='teller_transfer'),
     path('dashboard/auditor/', auditor_dashboard, name='dashboard_auditor'),
 ]

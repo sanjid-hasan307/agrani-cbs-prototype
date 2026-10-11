@@ -25,6 +25,7 @@ from transactions.models import Transaction
 from transactions.services.authorization_service import approve_transaction, reject_transaction
 from transactions.services.deposit_service import deposit
 from transactions.services.withdrawal_service import withdraw
+from transactions.services.transfer_service import transfer
 from users.views import get_user_role, get_user_staff_info
 
 logger = logging.getLogger(__name__)
@@ -296,7 +297,63 @@ def teller_withdraw(request: HttpRequest) -> HttpResponse:
 
     return redirect('dashboard_teller')
 
+@_role_required('Teller')
+def teller_transfer(request: HttpRequest) -> HttpResponse:
+    """Handle Teller-initiated fund transfer requests."""
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    from_account_number = request.POST.get('from_account_number', '').strip()
+    to_account_number = request.POST.get('to_account_number', '').strip()
+    amount_raw = request.POST.get('amount', '').strip()
+    description = request.POST.get('description', '').strip()
+    if not from_account_number or not to_account_number or not amount_raw:
+        messages.error(
+           request,
+           "Sender account, receiver account, and transfer amount are required."
+        )
+        return redirect('dashboard_teller')
+    try:
+        amount = parse_decimal_amount(amount_raw)
+    except (InvalidOperation, ValueError, ValidationError):
+        messages.error(
+          request,
+          "Invalid transfer amount. Enter a positive amount with a maximum of 2 decimal places."
+        )
+        return redirect('dashboard_teller')
 
+    try:
+        from_account = Account.objects.get(account_number=from_account_number)
+    except Account.DoesNotExist:
+        messages.error(request, "Sender account not found.")
+        return redirect('dashboard_teller')
+    try:
+        to_account = Account.objects.get(account_number=to_account_number)
+    except Account.DoesNotExist:
+        messages.error(request, "Receiver account not found.")
+        return redirect('dashboard_teller')
+    try:
+        txn = transfer(
+            from_account=from_account,
+            to_account=to_account,
+            amount=amount,
+            created_by=request.user,
+            description=description,
+        )
+    except ValidationError as e:
+        messages.error(request, f"Transfer failed: {e}")
+        return redirect('dashboard_teller')
+    except Exception:
+        logger.exception("Unexpected error during Teller fund transfer")
+        messages.error(
+            request,
+            "Transfer failed due to a server error. Please contact the administrator."
+        )
+        return redirect('dashboard_teller')
+    messages.success(
+        request,
+        f"Transfer {txn.transaction_id} created. Pending Manager approval."
+    )
+    return redirect('dashboard_teller')
 @_role_required('Auditor')
 def auditor_dashboard(request: HttpRequest) -> HttpResponse:
     """
