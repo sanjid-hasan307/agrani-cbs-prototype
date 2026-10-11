@@ -107,7 +107,118 @@
         </div>
     </div>
 
-    <!-- Cash Deposit Modal Form -->
+
+     <div class="card info-card mb-4">
+        <div class="card-body">
+            <h2 class="section-header h6 mb-3">Recent Transaction History</h2>
+
+            {% if recent_transactions %}
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Transaction ID</th>
+                            <th>Account Number</th>
+                            <th>Type</th>
+                            <th>Amount (BDT)</th>
+                            <th>Status</th>
+                            <th>Authorization</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+
+                    <tbody>
+                        {% for txn in recent_transactions %}
+                        <tr>
+                            <td>{{ txn.transaction_id }}</td>
+                            <td>
+                                {% if txn.transaction_type == "TRANSFER" %}
+                                    {{ txn.account.account_number }}
+                                    <br>
+                                    <small class="text-muted">
+                                        To:
+                                        {% for entry in txn.entries.all %}
+                                            {% if entry.entry_type == "CREDIT" %}
+                                                {{ entry.account.account_number }}
+                                            {% endif %}
+                                        {% endfor %}
+                                    </small>
+                                {% else %}
+                                    {{ txn.account.account_number }}
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if txn.transaction_type == "DEPOSIT" %}
+                                    💰 Deposit
+                                {% elif txn.transaction_type == "WITHDRAWAL" %}
+                                    💸 Withdrawal
+                                {% elif txn.transaction_type == "TRANSFER" %}
+                                    🔄 Transfer
+                                {% else %}
+                                    {{ txn.get_transaction_type_display }}
+                                {% endif %}
+                            </td>
+                            <td>{{ txn.amount }}</td>
+                            <td>
+                                {% if txn.status == "POSTED" or txn.status == "APPROVED" %}
+                                    <span class="badge bg-success">
+                                        {{ txn.status }}
+                                    </span>
+                                {% elif txn.status == "PENDING" %}
+                                    <span class="badge bg-warning text-dark">
+                                        {{ txn.status }}
+                                    </span>
+                                {% elif txn.status == "REJECTED" %}
+                                    <span class="badge bg-danger">
+                                        {{ txn.status }}
+                                    </span>
+                                {% elif txn.status == "REVERSED" %}
+                                    <span class="badge bg-dark">
+                                        {{ txn.status }}
+                                    </span>
+                                {% else %}
+                                    <span class="badge bg-secondary">
+                                        {{ txn.status }}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if txn.authorization_status == "APPROVED" %}
+                                    <span class="badge bg-success">
+                                        {{ txn.authorization_status }}
+                                    </span>
+                                {% elif txn.authorization_status == "PENDING" %}
+                                    <span class="badge bg-warning text-dark">
+                                        {{ txn.authorization_status }}
+                                    </span>
+                                {% elif txn.authorization_status == "REJECTED" %}
+                                    <span class="badge bg-danger">
+                                        {{ txn.authorization_status }}
+                                    </span>
+                                {% else %}
+                                    <span class="badge bg-secondary">
+                                        {{ txn.authorization_status }}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {{ txn.created_at|date:"d M Y H:i" }}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+
+                </table>
+            </div>
+
+            {% else %}
+                <p class="text-muted small mb-0">
+                    No recent transactions found.
+                </p>
+            {% endif %}
+
+        </div>
+    </div>
     <div class="modal fade" id="depositModal" tabindex="-1" aria-labelledby="depositModalLabel" aria-hidden="true">
         <div class="modal-dialog">
             <div class="modal-content">

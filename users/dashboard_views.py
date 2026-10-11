@@ -85,7 +85,6 @@ def manager_dashboard(request: HttpRequest) -> HttpResponse:
     - pending_transactions : queryset of pending transactions for the manager's branch
     """
     profile, branch = get_user_staff_info(request.user)
-
     if branch:
         pending_transactions = Transaction.objects.filter(
             account__branch=branch,
@@ -181,12 +180,17 @@ def teller_dashboard(request: HttpRequest) -> HttpResponse:
     - branch  : Branch linked to the profile (may be None)
     """
     profile, branch = get_user_staff_info(request.user)
-
+    recent_transactions = (
+        Transaction.objects
+        .filter(created_by=request.user)
+        .order_by('-created_at', '-id')[:10]
+   )
     context = {
         'role': 'Teller',
         'user': request.user,
         'profile': profile,
         'branch': branch,
+        'recent_transactions': recent_transactions,
     }
     return render(request, 'users/dashboard_teller.html', context)
 
