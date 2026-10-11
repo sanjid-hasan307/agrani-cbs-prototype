@@ -80,14 +80,14 @@
                             </div>
                         </div>
                     </div>
-                    <!-- Cash Withdrawal Placeholder -->
+                    <!-- Active Cash Withdrawal Card -->
                     <div class="col-sm-4">
-                        <div class="card action-card disabled-card text-center" style="border-top: 4px solid #ef4444;" title="Coming soon">
+                        <div class="card action-card active-card text-center" style="border-top: 4px solid #ef4444;" data-bs-toggle="modal" data-bs-target="#withdrawModal">
                             <div class="card-body">
                                 <div class="action-icon mb-2">&#128176;</div>
                                 <div class="fw-semibold text-dark">Cash Withdrawal</div>
                                 <p class="text-muted small mb-0">Withdraw funds from account</p>
-                                <span class="badge bg-secondary mt-2">Coming Soon</span>
+                                <span class="badge bg-danger mt-2">Active</span>
                             </div>
                         </div>
                     </div>
@@ -137,6 +137,41 @@
                     <div class="modal-footer bg-light">
                         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
                         <button type="submit" class="btn btn-success btn-sm" id="btn-submit-deposit">Submit Cash Deposit</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>  
+    <!-- Cash Withdrawal Modal Form -->
+    <div class="modal fade" id="withdrawModal" tabindex="-1" aria-labelledby="withdrawModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header" style="background-color: #f8fafc;">
+                    <h5 class="modal-title fw-bold fs-6 text-dark" id="withdrawModalLabel">Cash Withdrawal Request</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form action="{% url 'teller_withdraw' %}" method="POST" id="form-cash-withdraw">
+                    {% csrf_token %}
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="withdraw_account_number" class="form-label small fw-semibold">Account Number <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control form-control-sm" id="withdraw_account_number" name="account_number" placeholder="Enter account number (e.g. AC10001)" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="withdraw_amount" class="form-label small fw-semibold">Withdrawal Amount (BDT) <span class="text-danger">*</span></label>
+                            <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="withdraw_amount" name="amount" placeholder="0.00" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="withdraw_description" class="form-label small fw-semibold">Description / Remarks</label>
+                            <input type="text" class="form-control form-control-sm" id="withdraw_description" name="description" placeholder="Optional withdrawal narrative">
+                        </div>
+                        <div class="alert alert-warning py-2 small mb-0" role="alert">
+                            <strong>Note:</strong> Withdrawals created by Tellers require Manager approval before account balance is debited.
+                        </div>
+                    </div>
+                    <div class="modal-footer bg-light">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-danger btn-sm" id="btn-submit-withdraw">Submit Cash Withdrawal</button>
                     </div>
                 </form>
             </div>

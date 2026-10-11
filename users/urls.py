@@ -6,6 +6,7 @@ from users.dashboard_views import (
     manager_reject_transaction,
     teller_dashboard,
     teller_deposit,
+    teller_withdraw,
     auditor_dashboard,
 )
 
@@ -17,5 +18,6 @@ urlpatterns = [
     path('dashboard/manager/reject/<int:transaction_id>/', manager_reject_transaction, name='manager_reject_transaction'),
     path('dashboard/teller/', teller_dashboard, name='dashboard_teller'),
     path('dashboard/teller/deposit/', teller_deposit, name='teller_deposit'),
+    path('dashboard/teller/withdraw/', teller_withdraw, name='teller_withdraw'),
     path('dashboard/auditor/', auditor_dashboard, name='dashboard_auditor'),
 ]

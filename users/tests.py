@@ -7,6 +7,7 @@ from users.models import StaffProfile
 from customers.models import Customer
 from products.models import AccountProduct
 from accounts.models import Account
+from audit.models import AuditLog
 from transactions.models import Transaction
 from users.services.branch_permission import (
     get_user_branch,
@@ -1156,5 +1157,261 @@ class TellerDepositDashboardTest(TestCase):
         self.client.login(username="teller_dhaka", password="TellerPassword123!")
         response = self.client.get("/dashboard/teller/deposit/")
         self.assertEqual(response.status_code, 405)
+
+
+# =============================================================================
+# Phase 2 — Teller Cash Withdrawal Integration Tests
+# =============================================================================
+
+class TellerWithdrawDashboardTest(TestCase):
+    """
+    Tests for Teller Cash Withdrawal endpoint (/dashboard/teller/withdraw/).
+
+    Verifies:
+    - Valid withdrawal creates PENDING transaction and leaves balances unchanged.
+    - Insufficient balance rejects withdrawal attempt.
+    - Withdrawal cannot be made for an account in a different branch.
+    - Invalid amounts (negative, zero, NaN/Infinity, excessive precision) and non-existent accounts fail cleanly.
+    - Non-Teller roles (Manager, Auditor) are denied with HTTP 403.
+    - Unauthenticated requests redirect to /login/.
+    - GET method returns 405 Method Not Allowed.
+    - CSRF protection is enforced.
+    - Audit log entry is created on successful withdrawal request.
+    """
+
+    def setUp(self):
+        self.branch_a = Branch.objects.create(
+            branch_code="BR701",
+            branch_name="Motijheel Branch",
+            district="Dhaka",
+            address="Motijheel C/A",
+            is_active=True,
+        )
+        self.branch_b = Branch.objects.create(
+            branch_code="BR702",
+            branch_name="Agrabad Branch",
+            district="Chittagong",
+            address="Agrabad C/A",
+            is_active=True,
+        )
+
+        self.teller_group, _ = Group.objects.get_or_create(name="Teller")
+        self.manager_group, _ = Group.objects.get_or_create(name="Manager")
+
+        # Teller in Branch A
+        self.teller_user = User.objects.create_user(
+            username="teller_w_dhaka",
+            password="TellerPassword123!",
+            first_name="Tariq",
+            last_name="Islam",
+        )
+        self.teller_user.groups.add(self.teller_group)
+        StaffProfile.objects.create(
+            user=self.teller_user,
+            employee_id="EMP_TEL_W_DHAKA",
+            branch=self.branch_a,
+            designation="Cash Teller",
+            is_active=True,
+        )
+
+        # Manager in Branch A
+        self.manager_user = User.objects.create_user(
+            username="manager_w_dhaka",
+            password="ManagerPassword123!",
+        )
+        self.manager_user.groups.add(self.manager_group)
+        StaffProfile.objects.create(
+            user=self.manager_user,
+            employee_id="EMP_MGR_W_DHAKA",
+            branch=self.branch_a,
+            designation="Branch Manager",
+            is_active=True,
+        )
+
+        # Account Product
+        self.product = AccountProduct.objects.create(
+            product_code="SAV700",
+            product_name="Savings Account",
+            product_type=AccountProduct.ProductType.SAVINGS,
+            minimum_balance=Decimal("500.00"),
+            currency="BDT",
+        )
+
+        # Customer & Account in Branch A (Available Balance: 5000.00)
+        self.customer_a = Customer.objects.create(
+            full_name="Dhaka Customer",
+            phone="01700000701",
+            nid_number="NID7001",
+            present_address="Dhaka",
+            district="Dhaka",
+            home_branch=self.branch_a,
+            created_by=self.teller_user,
+        )
+        self.account_a = Account.objects.create(
+            customer=self.customer_a,
+            product=self.product,
+            branch=self.branch_a,
+            account_number="AC70001",
+            available_balance=Decimal("5000.00"),
+            ledger_balance=Decimal("5000.00"),
+        )
+
+        # Customer & Account in Branch B
+        self.customer_b = Customer.objects.create(
+            full_name="Chittagong Customer",
+            phone="01700000702",
+            nid_number="NID7002",
+            present_address="Chittagong",
+            district="Chittagong",
+            home_branch=self.branch_b,
+            created_by=self.teller_user,
+        )
+        self.account_b = Account.objects.create(
+            customer=self.customer_b,
+            product=self.product,
+            branch=self.branch_b,
+            account_number="AC70002",
+            available_balance=Decimal("10000.00"),
+            ledger_balance=Decimal("10000.00"),
+        )
+
+    def test_teller_can_create_withdrawal_successfully(self):
+        self.client.login(username="teller_w_dhaka", password="TellerPassword123!")
+        response = self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "1500.50",
+            "description": "Counter Cash Withdrawal",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "/dashboard/teller/")
+
+        # Verify transaction created in DB
+        txn = Transaction.objects.get(account=self.account_a)
+        self.assertEqual(txn.amount, Decimal("1500.50"))
+        self.assertEqual(txn.transaction_type, Transaction.TransactionType.WITHDRAWAL)
+        self.assertEqual(txn.authorization_status, Transaction.AuthorizationStatus.PENDING)
+        self.assertEqual(txn.status, Transaction.Status.PENDING)
+        self.assertEqual(txn.created_by, self.teller_user)
+
+    def test_withdrawal_leaves_balances_unchanged_before_approval(self):
+        self.client.login(username="teller_w_dhaka", password="TellerPassword123!")
+        self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "2000.00",
+            "description": "Preapproval balance test",
+        })
+        self.account_a.refresh_from_db()
+        # Balance must remain 5000.00 until Manager approval
+        self.assertEqual(self.account_a.available_balance, Decimal("5000.00"))
+        self.assertEqual(self.account_a.ledger_balance, Decimal("5000.00"))
+
+    def test_withdrawal_creation_records_audit_log(self):
+        self.client.login(username="teller_w_dhaka", password="TellerPassword123!")
+        self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "1000.00",
+            "description": "Audit log check",
+        })
+        txn = Transaction.objects.get(account=self.account_a)
+        audit_exists = AuditLog.objects.filter(
+            user=self.teller_user,
+            action="CREATE_WITHDRAWAL",
+            object_id=txn.transaction_id,
+        ).exists()
+        self.assertTrue(audit_exists)
+
+    def test_teller_withdrawal_insufficient_balance_fails(self):
+        self.client.login(username="teller_w_dhaka", password="TellerPassword123!")
+        response = self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "10000.00",  # Available is 5000.00
+            "description": "Excessive withdrawal",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Transaction.objects.filter(account=self.account_a).count(), 0)
+
+        # Balance remains unchanged
+        self.account_a.refresh_from_db()
+        self.assertEqual(self.account_a.available_balance, Decimal("5000.00"))
+
+    def test_teller_cannot_withdraw_from_different_branch_account(self):
+        self.client.login(username="teller_w_dhaka", password="TellerPassword123!")
+        response = self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70002",  # Branch B account
+            "amount": "1000.00",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Transaction.objects.filter(account=self.account_b).count(), 0)
+
+    def test_teller_withdrawal_invalid_inputs_fail(self):
+        self.client.login(username="teller_w_dhaka", password="TellerPassword123!")
+
+        # Non-existent account
+        self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC99999",
+            "amount": "1000.00",
+        })
+        # Negative amount
+        self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "-500.00",
+        })
+        # Zero amount
+        self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "0.00",
+        })
+        # Non-numeric format
+        self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "abc_invalid",
+        })
+        # Excessive decimal precision (> 2 decimal places)
+        self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "100.123",
+        })
+        # Non-finite amount
+        self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "NaN",
+        })
+
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_non_teller_denied_access_to_withdrawal_endpoint(self):
+        self.client.login(username="manager_w_dhaka", password="ManagerPassword123!")
+        response = self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "1000.00",
+        })
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_unauthenticated_user_redirected_on_withdraw(self):
+        response = self.client.post("/dashboard/teller/withdraw/", {
+            "account_number": "AC70001",
+            "amount": "1000.00",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response.url)
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    def test_get_method_returns_405_on_withdraw(self):
+        self.client.login(username="teller_w_dhaka", password="TellerPassword123!")
+        response = self.client.get("/dashboard/teller/withdraw/")
+        self.assertEqual(response.status_code, 405)
+
+    def test_withdraw_csrf_enforcement(self):
+        from django.test import Client
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.login(username="teller_w_dhaka", password="TellerPassword123!")
+        response = csrf_client.post(
+            "/dashboard/teller/withdraw/",
+            data="account_number=AC70001&amount=1000.00",
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 403)
+
 
 

@@ -12,18 +12,37 @@ Architectural assumption:
   This prevents privilege escalation through URL guessing and keeps access
   control out of templates.
 """
+import logging
+from decimal import Decimal, InvalidOperation
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ValidationError
 from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
 
-from decimal import Decimal, InvalidOperation
 from accounts.models import Account
 from transactions.models import Transaction
 from transactions.services.authorization_service import approve_transaction, reject_transaction
 from transactions.services.deposit_service import deposit
+from transactions.services.withdrawal_service import withdraw
 from users.views import get_user_role, get_user_staff_info
+
+logger = logging.getLogger(__name__)
+
+
+def parse_decimal_amount(amount_raw: str) -> Decimal:
+    """
+    Safely parses string amount to Decimal.
+    Validates finite representation, positive value (> 0), and maximum 2 decimal places.
+    """
+    amount = Decimal(amount_raw)
+    if amount.is_nan() or amount.is_infinite():
+        raise ValidationError("Amount must be a finite numeric value.")
+    if amount <= Decimal("0.00"):
+        raise ValidationError("Amount must be positive.")
+    if amount.as_tuple().exponent < -2:
+        raise ValidationError("Amount cannot have more than 2 decimal places.")
+    return amount
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +237,62 @@ def teller_deposit(request: HttpRequest) -> HttpResponse:
             err_msg = "; ".join([f"{', '.join(v)}" for k, v in e.message_dict.items()])
         messages.error(request, f"Deposit failed: {err_msg}")
     except Exception as e:
-        messages.error(request, f"Deposit failed: {str(e)}")
+        logger.error(f"Unexpected error during deposit: {str(e)}", exc_info=True)
+        messages.error(request, "Deposit failed due to a server error. Please contact administrator.")
+
+    return redirect('dashboard_teller')
+
+
+@_role_required('Teller')
+def teller_withdraw(request: HttpRequest) -> HttpResponse:
+    """
+    Teller Cash Withdrawal POST View — /dashboard/teller/withdraw/
+    Creates a PENDING cash withdrawal transaction requiring Manager approval.
+    """
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+
+    account_number = request.POST.get('account_number', '').strip()
+    amount_raw = request.POST.get('amount', '').strip()
+    description = request.POST.get('description', '').strip()
+
+    if not account_number or not amount_raw:
+        messages.error(request, "Account number and withdrawal amount are required.")
+        return redirect('dashboard_teller')
+
+    try:
+        amount = parse_decimal_amount(amount_raw)
+    except (InvalidOperation, ValueError, ValidationError) as e:
+        err_msg = str(e) if isinstance(e, ValidationError) else "Invalid withdrawal amount format."
+        messages.error(request, f"Withdrawal failed: {err_msg}")
+        return redirect('dashboard_teller')
+
+    try:
+        account = Account.objects.get(account_number=account_number)
+    except Account.DoesNotExist:
+        messages.error(request, f"Account '{account_number}' not found.")
+        return redirect('dashboard_teller')
+
+    try:
+        txn = withdraw(
+            account=account,
+            amount=amount,
+            created_by=request.user,
+            description=description,
+        )
+        messages.success(
+            request,
+            f"Withdrawal transaction {txn.transaction_id} initiated successfully. "
+            f"Status is PENDING and requires Manager approval."
+        )
+    except ValidationError as e:
+        err_msg = e.message if hasattr(e, 'message') else str(e)
+        if hasattr(e, 'message_dict') and isinstance(e.message_dict, dict):
+            err_msg = "; ".join([f"{', '.join(v)}" for k, v in e.message_dict.items()])
+        messages.error(request, f"Withdrawal failed: {err_msg}")
+    except Exception as e:
+        logger.error(f"Unexpected error during withdrawal: {str(e)}", exc_info=True)
+        messages.error(request, "Withdrawal failed due to a server error. Please contact administrator.")
 
     return redirect('dashboard_teller')
 
