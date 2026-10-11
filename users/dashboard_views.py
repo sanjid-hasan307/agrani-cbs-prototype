@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ValidationError
-from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed
+from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, request
 from django.shortcuts import get_object_or_404, redirect, render
 
 from accounts.models import Account
@@ -27,6 +27,7 @@ from transactions.services.deposit_service import deposit
 from transactions.services.withdrawal_service import withdraw
 from transactions.services.transfer_service import transfer
 from users.views import get_user_role, get_user_staff_info
+from django.core.paginator import Paginator
 
 logger = logging.getLogger(__name__)
 
@@ -180,17 +181,50 @@ def teller_dashboard(request: HttpRequest) -> HttpResponse:
     - branch  : Branch linked to the profile (may be None)
     """
     profile, branch = get_user_staff_info(request.user)
-    recent_transactions = (
-        Transaction.objects
-        .filter(created_by=request.user)
-        .order_by('-created_at', '-id')[:10]
-   )
+    transactions = Transaction.objects.filter(
+        created_by=request.user
+    )
+
+    account_number = request.GET.get('account_number', '').strip()
+    transaction_type = request.GET.get('transaction_type', '').strip()
+    status = request.GET.get('status', '').strip()
+
+
+    if account_number:
+        transactions = transactions.filter(
+            account__account_number=account_number
+        )
+
+    if transaction_type:
+        transactions = transactions.filter(
+            transaction_type=transaction_type
+        )
+
+    if status:
+        transactions = transactions.filter(
+            status=status
+        )
+
+
+    transactions = transactions.order_by(
+        '-created_at',
+        '-id'
+    )
+
+    paginator = Paginator(transactions, 10)
+
+    page_number = request.GET.get('page')
+
+    recent_transactions = paginator.get_page(page_number)
     context = {
         'role': 'Teller',
         'user': request.user,
         'profile': profile,
         'branch': branch,
         'recent_transactions': recent_transactions,
+        'account_number': account_number,
+        'transaction_type': transaction_type,
+        'status': status,
     }
     return render(request, 'users/dashboard_teller.html', context)
 

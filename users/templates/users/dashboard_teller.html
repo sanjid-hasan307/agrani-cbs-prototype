@@ -111,7 +111,80 @@
      <div class="card info-card mb-4">
         <div class="card-body">
             <h2 class="section-header h6 mb-3">Recent Transaction History</h2>
+            <form method="GET" class="row g-2 mb-3">
+                <div class="col-md-4">
+                    <input 
+                        type="text"
+                        name="account_number"
+                        class="form-control form-control-sm"
+                        placeholder="Account Number"
+                        value="{{ account_number }}">
+                </div>
 
+                <div class="col-md-3">
+                    <select 
+                        name="transaction_type"
+                        class="form-select form-select-sm">
+
+                        <option value="">All Types</option>
+
+                        <option value="DEPOSIT"
+                        {% if transaction_type == "DEPOSIT" %}selected{% endif %}>
+                            Deposit
+                        </option>
+
+                        <option value="WITHDRAWAL"
+                        {% if transaction_type == "WITHDRAWAL" %}selected{% endif %}>
+                            Withdrawal
+                        </option>
+
+                        <option value="TRANSFER"
+                        {% if transaction_type == "TRANSFER" %}selected{% endif %}>
+                            Transfer
+                        </option>
+
+                    </select>
+                </div>
+
+
+                <div class="col-md-3">
+                    <select 
+                        name="status"
+                        class="form-select form-select-sm">
+
+                        <option value="">All Status</option>
+
+                        <option value="PENDING"
+                        {% if status == "PENDING" %}selected{% endif %}>
+                            Pending
+                        </option>
+
+                        <option value="POSTED"
+                        {% if status == "POSTED" %}selected{% endif %}>
+                            Posted
+                        </option>
+
+                        <option value="REJECTED"
+                        {% if status == "REJECTED" %}selected{% endif %}>
+                            Rejected
+                        </option>
+
+                    </select>
+                </div>
+
+                <div class="col-md-2">
+                    <button class="btn btn-primary btn-sm w-100">
+                        Filter
+                    </button>
+                </div>
+
+                <div class="col-md-2">
+                    <a href="{% url 'dashboard_teller' %}" 
+                      class="btn btn-secondary btn-sm w-100">
+                        Clear
+                    </a>
+                </div>
+            </form>
             {% if recent_transactions %}
             <div class="table-responsive">
                 <table class="table table-sm align-middle mb-0">
@@ -209,14 +282,48 @@
                     </tbody>
 
                 </table>
-            </div>
+                {% if recent_transactions.has_other_pages %}
+                <nav aria-label="Transaction pagination" class="mt-3">
+                    <ul class="pagination pagination-sm justify-content-center">
 
+                        {% if recent_transactions.has_previous %}
+                        <li class="page-item">
+                            <a class="page-link"
+                            href="?page={{ recent_transactions.previous_page_number }}{% if account_number %}&account_number={{ account_number }}{% endif %}{% if transaction_type %}&transaction_type={{ transaction_type }}{% endif %}{% if status %}&status={{ status }}{% endif %}">
+                                Previous
+                            </a>
+                        </li>
+                        {% endif %}
+
+
+                        <li class="page-item active">
+                            <span class="page-link">
+                                Page {{ recent_transactions.number }}
+                                of {{ recent_transactions.paginator.num_pages }}
+                            </span>
+                        </li>
+
+
+                        {% if recent_transactions.has_next %}
+                        <li class="page-item">
+                            <a class="page-link"
+                            href="?page={{ recent_transactions.next_page_number }}{% if account_number %}&account_number={{ account_number }}{% endif %}{% if transaction_type %}&transaction_type={{ transaction_type }}{% endif %}{% if status %}&status={{ status }}{% endif %}">
+                                Next
+                            </a>
+                        </li>
+                        {% endif %}
+
+                    </ul>
+                </nav>
+                {% endif %}
+
+
+            </div>
             {% else %}
                 <p class="text-muted small mb-0">
                     No recent transactions found.
                 </p>
-            {% endif %}
-
+            {% endif %}  
         </div>
     </div>
     <div class="modal fade" id="depositModal" tabindex="-1" aria-labelledby="depositModalLabel" aria-hidden="true">
