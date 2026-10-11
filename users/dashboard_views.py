@@ -86,19 +86,39 @@ def manager_dashboard(request: HttpRequest) -> HttpResponse:
     - pending_transactions : queryset of pending transactions for the manager's branch
     """
     profile, branch = get_user_staff_info(request.user)
+    account_number = request.GET.get('account_number', '').strip()
+    transaction_type = request.GET.get('transaction_type', '').strip()
+
     if branch:
         pending_transactions = Transaction.objects.filter(
             account__branch=branch,
             authorization_status=Transaction.AuthorizationStatus.PENDING,
-        ).select_related('account', 'created_by', 'account__customer').order_by('-created_at')
+        )
     elif request.user.is_superuser:
         pending_transactions = Transaction.objects.filter(
             authorization_status=Transaction.AuthorizationStatus.PENDING,
-        ).select_related('account', 'created_by', 'account__customer').order_by('-created_at')
+        )
     else:
         pending_transactions = Transaction.objects.none()
 
+    if account_number:
+        pending_transactions = pending_transactions.filter(
+            account__account_number__icontains=account_number
+        )
+
+    if transaction_type:
+        pending_transactions = pending_transactions.filter(
+            transaction_type=transaction_type
+        )
+
+    pending_transactions = pending_transactions.select_related(
+        'account', 'created_by', 'account__customer'
+    ).order_by('-created_at')
+
     pending_count = pending_transactions.count()
+    paginator = Paginator(pending_transactions, 1)
+    page_number = request.GET.get('page', 1)
+    page_obj = paginator.get_page(page_number)
 
     context = {
         'role': 'Manager',
@@ -106,7 +126,9 @@ def manager_dashboard(request: HttpRequest) -> HttpResponse:
         'profile': profile,
         'branch': branch,
         'pending_count': pending_count,
-        'pending_transactions': pending_transactions,
+        'pending_transactions': page_obj,
+        'account_number': account_number,
+        'transaction_type': transaction_type,
     }
     return render(request, 'users/dashboard_manager.html', context)
 
