@@ -189,7 +189,7 @@ These are prototype application controls, not a security certification or produc
 
 ![Agrani Bank CBS Secure Login Modal](docs/screenshots/login-modal.png)
 
-### Vue Manager Dashboard
+### Django Manager Dashboard — Transaction Approval Queue
 
 ![Agrani Bank CBS Manager Dashboard](docs/screenshots/manager-dashboard.png)
 
