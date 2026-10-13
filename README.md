@@ -181,6 +181,9 @@ Django authentication and session middleware support staff sign-in. Django-rende
 These are prototype application controls, not a security certification or production security assessment. The checked-in settings default to debug mode and a permissive host configuration, so they are not suitable for production. Do not use real credentials, customer data, or funds. Production use would require a dedicated security review, hardened environment-specific settings, operational controls, and applicable organizational and regulatory approval.
 
 ## Screenshots
+### CBS Landing Page
+
+![Agrani Bank CBS Landing Page](docs/screenshots/landing-page.png)
 
 Screenshots will be added when the interfaces are prepared for portfolio presentation.
 
