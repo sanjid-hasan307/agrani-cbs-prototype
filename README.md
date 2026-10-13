@@ -189,6 +189,10 @@ These are prototype application controls, not a security certification or produc
 
 ![Agrani Bank CBS Secure Login Modal](docs/screenshots/login-modal.png)
 
+### Vue Manager Dashboard
+
+![Agrani Bank CBS Manager Dashboard](docs/screenshots/manager-dashboard.png)
+
 
 
 Screenshots will be added when the interfaces are prepared for portfolio presentation.
