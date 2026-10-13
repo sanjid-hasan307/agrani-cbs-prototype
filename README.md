@@ -193,6 +193,9 @@ These are prototype application controls, not a security certification or produc
 
 ![Agrani Bank CBS Manager Dashboard](docs/screenshots/manager-dashboard.png)
 
+### Django Teller Dashboard
+
+![Agrani Bank CBS Teller Dashboard](docs/screenshots/teller-dashboard.png)
 
 
 Screenshots will be added when the interfaces are prepared for portfolio presentation.
