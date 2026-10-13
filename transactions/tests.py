@@ -1,7 +1,11 @@
 from datetime import date
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from unittest import skipUnless
 from unittest.mock import patch
-from django.test import TestCase
+from django.db import close_old_connections, connection
+from django.test import Client, TestCase, TransactionTestCase
 from django.core.exceptions import ValidationError
 from django.contrib.auth.models import User, Group
 from rest_framework.test import APIClient
@@ -627,6 +631,108 @@ class MakerCheckerAuthorizationTest(TestCase):
             approve_transaction(transaction=txn, checker_user=other_manager)
         self.assertIn("Only PENDING", str(ctx.exception))
 
+    def test_approval_reloads_state_instead_of_trusting_stale_instance(self):
+        txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=self.maker_teller)
+        stale_txn = Transaction.objects.get(pk=txn.pk)
+        Transaction.objects.filter(pk=txn.pk).update(
+            authorization_status=Transaction.AuthorizationStatus.REJECTED,
+            status=Transaction.Status.REJECTED,
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            approve_transaction(transaction=stale_txn, checker_user=self.checker_manager)
+
+        self.assertIn("Only PENDING", str(ctx.exception))
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.available_balance, Decimal("0.00"))
+        self.assertFalse(AuditLog.objects.filter(
+            action="APPROVE_TRANSACTION",
+            object_id=txn.transaction_id,
+        ).exists())
+
+    def test_rejection_reloads_state_instead_of_trusting_stale_instance(self):
+        txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=self.maker_teller)
+        stale_txn = Transaction.objects.get(pk=txn.pk)
+        Transaction.objects.filter(pk=txn.pk).update(
+            authorization_status=Transaction.AuthorizationStatus.APPROVED,
+            status=Transaction.Status.POSTED,
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            reject_transaction(
+                transaction=stale_txn,
+                checker_user=self.checker_manager,
+                reason="Late rejection",
+            )
+
+        self.assertIn("Only PENDING", str(ctx.exception))
+        self.assertFalse(AuditLog.objects.filter(
+            action="REJECT_TRANSACTION",
+            object_id=txn.transaction_id,
+        ).exists())
+
+    def test_double_approval_posts_only_once(self):
+        txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=self.maker_teller)
+        stale_txn = Transaction.objects.get(pk=txn.pk)
+        approve_transaction(transaction=txn, checker_user=self.checker_manager)
+
+        with self.assertRaises(ValidationError) as ctx:
+            approve_transaction(transaction=stale_txn, checker_user=self.checker_manager)
+
+        self.assertIn("Only PENDING", str(ctx.exception))
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.available_balance, Decimal("1000.00"))
+        self.assertEqual(AuditLog.objects.filter(
+            action="APPROVE_TRANSACTION",
+            object_id=txn.transaction_id,
+        ).count(), 1)
+
+    def test_approval_followed_by_rejection_has_one_terminal_outcome(self):
+        txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=self.maker_teller)
+        stale_txn = Transaction.objects.get(pk=txn.pk)
+        approve_transaction(transaction=txn, checker_user=self.checker_manager)
+
+        with self.assertRaises(ValidationError) as ctx:
+            reject_transaction(
+                transaction=stale_txn,
+                checker_user=self.checker_manager,
+                reason="Attempted after approval",
+            )
+
+        self.assertIn("Only PENDING", str(ctx.exception))
+        txn.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(txn.authorization_status, Transaction.AuthorizationStatus.APPROVED)
+        self.assertEqual(txn.status, Transaction.Status.POSTED)
+        self.assertEqual(self.account.available_balance, Decimal("1000.00"))
+        self.assertEqual(AuditLog.objects.filter(
+            object_id=txn.transaction_id,
+            action__in=("APPROVE_TRANSACTION", "REJECT_TRANSACTION"),
+        ).count(), 1)
+
+    def test_rejection_followed_by_approval_has_one_terminal_outcome(self):
+        txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=self.maker_teller)
+        stale_txn = Transaction.objects.get(pk=txn.pk)
+        reject_transaction(
+            transaction=txn,
+            checker_user=self.checker_manager,
+            reason="Rejected first",
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            approve_transaction(transaction=stale_txn, checker_user=self.checker_manager)
+
+        self.assertIn("Only PENDING", str(ctx.exception))
+        txn.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(txn.authorization_status, Transaction.AuthorizationStatus.REJECTED)
+        self.assertEqual(txn.status, Transaction.Status.REJECTED)
+        self.assertEqual(self.account.available_balance, Decimal("0.00"))
+        self.assertEqual(AuditLog.objects.filter(
+            object_id=txn.transaction_id,
+            action__in=("APPROVE_TRANSACTION", "REJECT_TRANSACTION"),
+        ).count(), 1)
+
     def test_failed_posting_rolls_back_approval(self):
         txn = deposit(account=self.account, amount=Decimal("1000.00"), created_by=self.maker_teller)
 
@@ -639,6 +745,104 @@ class MakerCheckerAuthorizationTest(TestCase):
         txn.refresh_from_db()
         self.assertEqual(txn.authorization_status, Transaction.AuthorizationStatus.PENDING)
         self.assertEqual(txn.status, Transaction.Status.PENDING)
+
+
+@skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL row-level locking")
+class ConcurrentTransactionAuthorizationTest(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.branch = Branch.objects.create(
+            branch_code="BR_CONC",
+            branch_name="Concurrency Test Branch",
+            district="Dhaka",
+            address="Test address",
+            is_active=True,
+        )
+        manager_group, _ = Group.objects.get_or_create(name="Manager")
+        teller_group, _ = Group.objects.get_or_create(name="Teller")
+        self.maker = User.objects.create_user(username="concurrent_maker")
+        self.maker.groups.add(teller_group)
+        StaffProfile.objects.create(
+            user=self.maker,
+            employee_id="EMP_CONC_T1",
+            branch=self.branch,
+            is_active=True,
+        )
+        manager = User.objects.create_user(username="concurrent_manager")
+        manager.groups.add(manager_group)
+        StaffProfile.objects.create(
+            user=manager,
+            employee_id="EMP_CONC_M1",
+            branch=self.branch,
+            is_active=True,
+        )
+        self.manager_id = manager.pk
+        self.customer = Customer.objects.create(
+            customer_type=Customer.CustomerType.INDIVIDUAL,
+            full_name="Concurrency Test Customer",
+            date_of_birth=date(1985, 3, 20),
+            nid_number="1985123456700",
+            phone="01811111112",
+            present_address="Test address",
+            district="Dhaka",
+            home_branch=self.branch,
+            created_by=self.maker,
+            status=Customer.Status.ACTIVE,
+        )
+        product = AccountProduct.objects.get(product_code="SAV")
+        self.account = Account.objects.create(
+            customer=self.customer,
+            product=product,
+            branch=self.branch,
+        )
+        self.transaction = deposit(
+            account=self.account,
+            amount=Decimal("1000.00"),
+            created_by=self.maker,
+        )
+
+    def test_concurrent_approvals_post_only_once(self):
+        barrier = Barrier(2)
+        transaction_id = self.transaction.pk
+        manager_id = self.manager_id
+
+        def try_approve():
+            close_old_connections()
+            try:
+                checker = User.objects.get(pk=manager_id)
+                client = Client(enforce_csrf_checks=True)
+                client.force_login(checker)
+                client.get("/api/csrf/")
+                csrf_token = client.cookies["csrftoken"].value
+                barrier.wait(timeout=10)
+                response = client.post(
+                    f"/api/manager/transactions/{transaction_id}/approve/",
+                    data={},
+                    content_type="application/json",
+                    HTTP_X_CSRFTOKEN=csrf_token,
+                )
+                return response.status_code
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: try_approve(), range(2)))
+
+        self.assertEqual(results.count(200), 1)
+        self.assertEqual(results.count(400), 1)
+        self.transaction.refresh_from_db()
+        self.account.refresh_from_db()
+        self.assertEqual(
+            self.transaction.authorization_status,
+            Transaction.AuthorizationStatus.APPROVED,
+        )
+        self.assertEqual(self.transaction.status, Transaction.Status.POSTED)
+        self.assertEqual(self.account.available_balance, Decimal("1000.00"))
+        self.assertEqual(AuditLog.objects.filter(
+            action="APPROVE_TRANSACTION",
+            object_id=self.transaction.transaction_id,
+        ).count(), 1)
 
 
 class TransactionCreationAuditTest(TestCase):
@@ -1137,6 +1341,5 @@ class TransactionBranchAccessControlTest(TestCase):
             created_by=self.superuser,
         )
         self.assertEqual(trf_txn.status, Transaction.Status.PENDING)
-
 
 

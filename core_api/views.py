@@ -1,17 +1,40 @@
+import json
+
 from django.contrib.auth import authenticate, login as django_login
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from .serializers import LoginSerializer
 from users.views import get_user_role, get_user_staff_info
-from django.views.decorators.csrf import csrf_protect
-from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt, csrf_protect
+from django.middleware.csrf import CsrfViewMiddleware
+from django.utils.decorators import decorator_from_middleware, method_decorator
 from django.http import JsonResponse
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.http import HttpResponseForbidden
 from django.views.decorators.http import require_GET
 from django.core.paginator import Paginator
+from django.core.exceptions import ValidationError
 from transactions.models import Transaction
+from transactions.services.authorization_service import (
+    approve_transaction,
+    reject_transaction,
+)
+
+
+class _JsonCsrfViewMiddleware(CsrfViewMiddleware):
+    def _reject(self, request, reason):
+        return JsonResponse(
+            {"success": False, "message": "CSRF verification failed."},
+            status=403,
+        )
+
+
+def json_csrf_protect(view_func):
+    protected_view = decorator_from_middleware(_JsonCsrfViewMiddleware)(view_func)
+    # Let the local middleware return JSON instead of the global HTML CSRF page.
+    return csrf_exempt(protected_view)
+
 
 @csrf_protect
 @ensure_csrf_cookie
@@ -158,3 +181,117 @@ def manager_pending_transactions_api(request):
         },
         "transactions": transactions,
     })
+
+
+def _manager_transaction_action(request, transaction_id, action, reason=""):
+    if not request.user.is_authenticated:
+        return JsonResponse(
+            {"success": False, "message": "Authentication required."},
+            status=401,
+        )
+
+    if not request.user.groups.filter(name="Manager").exists():
+        return JsonResponse(
+            {"success": False, "message": "Manager access required."},
+            status=403,
+        )
+
+    transaction = Transaction.objects.select_related("account", "created_by").filter(
+        pk=transaction_id
+    ).first()
+    if transaction is None:
+        return JsonResponse(
+            {"success": False, "message": "Transaction not found."},
+            status=404,
+        )
+
+    _, branch = get_user_staff_info(request.user)
+    if not request.user.is_superuser and (
+        branch is None or transaction.account.branch_id != branch.id
+    ):
+        return JsonResponse(
+            {"success": False, "message": "Access denied for this transaction."},
+            status=403,
+        )
+
+    try:
+        if action == "approve":
+            approve_transaction(transaction=transaction, checker_user=request.user)
+        else:
+            reject_transaction(
+                transaction=transaction,
+                checker_user=request.user,
+                reason=reason,
+            )
+    except ValidationError as error:
+        validation_messages = error.messages
+        past_action = "approved" if action == "approve" else "rejected"
+        if any("Maker cannot" in message for message in validation_messages):
+            message = "You cannot act on a transaction you created."
+        elif any("Only PENDING transactions" in message for message in validation_messages):
+            message = "Only pending transactions can be processed."
+        else:
+            message = f"Transaction could not be {past_action}."
+        return JsonResponse(
+            {"success": False, "message": message},
+            status=400,
+        )
+
+    past_action = "approved" if action == "approve" else "rejected"
+    return JsonResponse(
+        {"success": True, "message": f"Transaction {past_action} successfully."},
+        status=200,
+    )
+
+
+@json_csrf_protect
+def manager_approve_transaction_api(request, transaction_id):
+    if request.method != "POST":
+        return JsonResponse(
+            {"success": False, "message": "POST method required."},
+            status=405,
+        )
+
+    return _manager_transaction_action(request, transaction_id, "approve")
+
+
+@json_csrf_protect
+def manager_reject_transaction_api(request, transaction_id):
+    if request.method != "POST":
+        return JsonResponse(
+            {"success": False, "message": "POST method required."},
+            status=405,
+        )
+
+    try:
+        payload = json.loads(request.body or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse(
+            {"success": False, "message": "Request body must be valid JSON."},
+            status=400,
+        )
+
+    if not isinstance(payload, dict):
+        return JsonResponse(
+            {"success": False, "message": "Request body must be a JSON object."},
+            status=400,
+        )
+
+    reason = payload.get("reason", "")
+    if not isinstance(reason, str):
+        return JsonResponse(
+            {"success": False, "message": "Reason must be a string."},
+            status=400,
+        )
+    if len(reason) > 500:
+        return JsonResponse(
+            {"success": False, "message": "Reason must be 500 characters or fewer."},
+            status=400,
+        )
+
+    return _manager_transaction_action(
+        request,
+        transaction_id,
+        "reject",
+        reason=reason.strip(),
+    )

@@ -41,22 +41,22 @@ def approve_transaction(transaction: Transaction, checker_user: User) -> Transac
         ValidationError: If checker is not a Manager, maker is checker, transaction is not PENDING,
                          or posting fails (e.g. insufficient balance).
     """
-    # 1. Role check: Only Managers can approve
-    if not is_manager(checker_user):
-        raise ValidationError({"checker_user": "Only users with the Manager role can approve transactions."})
-
-    # 2. Maker-checker check: Maker cannot approve own transaction
-    if transaction.created_by_id == checker_user.id:
-        raise ValidationError({"checker_user": "Maker cannot approve their own transaction."})
-
-    # 3. Status check: Only PENDING transactions can be approved
-    if transaction.authorization_status != Transaction.AuthorizationStatus.PENDING:
-        raise ValidationError(
-            {"authorization_status": f"Only PENDING transactions can be approved. "
-                                      f"Current status: {transaction.authorization_status}."}
-        )
-
     with db_transaction.atomic():
+        transaction = Transaction.objects.select_for_update().get(pk=transaction.pk)
+
+        # Validate permissions and state against the row protected by this transaction.
+        if not is_manager(checker_user):
+            raise ValidationError({"checker_user": "Only users with the Manager role can approve transactions."})
+
+        if transaction.created_by_id == checker_user.id:
+            raise ValidationError({"checker_user": "Maker cannot approve their own transaction."})
+
+        if transaction.authorization_status != Transaction.AuthorizationStatus.PENDING:
+            raise ValidationError(
+                {"authorization_status": f"Only PENDING transactions can be approved. "
+                                          f"Current status: {transaction.authorization_status}."}
+            )
+
         # 4. Apply approval state changes
         transaction.authorization_status = Transaction.AuthorizationStatus.APPROVED
         transaction.approved_by = checker_user
@@ -100,22 +100,21 @@ def reject_transaction(transaction: Transaction, checker_user: User, reason: str
     Raises:
         ValidationError: If checker is not a Manager, maker is checker, or transaction is not PENDING.
     """
-    # 1. Role check: Only Managers can reject
-    if not is_manager(checker_user):
-        raise ValidationError({"checker_user": "Only users with the Manager role can reject transactions."})
-
-    # 2. Maker-checker check: Maker cannot reject own transaction
-    if transaction.created_by_id == checker_user.id:
-        raise ValidationError({"checker_user": "Maker cannot reject their own transaction."})
-
-    # 3. Status check: Only PENDING transactions can be rejected
-    if transaction.authorization_status != Transaction.AuthorizationStatus.PENDING:
-        raise ValidationError(
-            {"authorization_status": f"Only PENDING transactions can be rejected. "
-                                      f"Current status: {transaction.authorization_status}."}
-        )
-
     with db_transaction.atomic():
+        transaction = Transaction.objects.select_for_update().get(pk=transaction.pk)
+
+        if not is_manager(checker_user):
+            raise ValidationError({"checker_user": "Only users with the Manager role can reject transactions."})
+
+        if transaction.created_by_id == checker_user.id:
+            raise ValidationError({"checker_user": "Maker cannot reject their own transaction."})
+
+        if transaction.authorization_status != Transaction.AuthorizationStatus.PENDING:
+            raise ValidationError(
+                {"authorization_status": f"Only PENDING transactions can be rejected. "
+                                          f"Current status: {transaction.authorization_status}."}
+            )
+
         # 4. Apply rejection state changes
         transaction.authorization_status = Transaction.AuthorizationStatus.REJECTED
         transaction.status = Transaction.Status.REJECTED
