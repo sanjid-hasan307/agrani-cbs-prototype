@@ -185,6 +185,12 @@ These are prototype application controls, not a security certification or produc
 
 ![Agrani Bank CBS Landing Page](docs/screenshots/landing-page.png)
 
+### Secure Login Modal
+
+![Agrani Bank CBS Secure Login Modal](docs/screenshots/login-modal.png)
+
+
+
 Screenshots will be added when the interfaces are prepared for portfolio presentation.
 
 - Django Teller dashboard — *Screenshot to be added*
