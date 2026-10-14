@@ -156,7 +156,8 @@ def manager_pending_transactions_api(request):
     page_obj = paginator.get_page(request.GET.get("page", 1))
 
     transactions = [
-        {
+        {   
+            "id": transaction.pk,
             "transaction_id": transaction.transaction_id,
             "transaction_type": transaction.transaction_type,
             "account_number": transaction.account.account_number,

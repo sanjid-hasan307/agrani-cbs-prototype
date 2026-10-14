@@ -10,6 +10,10 @@ const authorized = ref(false)
 const username = ref('')
 const loading = ref(false)
 const error = ref('')
+const actionError = ref('')
+const actionMessage = ref('')
+const actionDialog = ref(null)
+const actionInProgress = ref(false)
 const transactions = ref([])
 const pendingCount = ref(0)
 const pagination = ref({
@@ -48,6 +52,10 @@ function handleAuthorizationError(status) {
     authorized.value = false
     transactions.value = []
     pendingCount.value = 0
+    username.value = ''
+    actionDialog.value = null
+    actionError.value = ''
+    actionMessage.value = ''
     router.replace('/login')
     return true
   }
@@ -93,13 +101,68 @@ async function loadTransactions(page = 1) {
 }
 
 function applyFilters() {
+  actionMessage.value = ''
   loadTransactions(1)
 }
 
 function clearFilters() {
   accountNumberFilter.value = ''
   transactionTypeFilter.value = ''
+  actionMessage.value = ''
   loadTransactions(1)
+}
+
+function openActionDialog(transaction, action) {
+  if (actionInProgress.value || transaction.created_by === username.value) {
+    return
+  }
+
+  actionError.value = ''
+  actionMessage.value = ''
+  actionDialog.value = {
+    transaction,
+    action,
+    reason: ''
+  }
+}
+
+async function submitTransactionAction() {
+  const pendingAction = actionDialog.value
+  if (!pendingAction || actionInProgress.value) {
+    return
+  }
+
+  actionInProgress.value = true
+  actionError.value = ''
+  const endpoint = `/manager/transactions/${pendingAction.transaction.id}/${pendingAction.action}/`
+
+  try {
+    const response = pendingAction.action === 'reject'
+      ? await api.post(endpoint, { reason: pendingAction.reason.trim() })
+      : await api.post(endpoint)
+
+    if (!response.data.success) {
+      actionError.value = response.data.message || 'The transaction action could not be completed.'
+      return
+    }
+
+    const pastAction = pendingAction.action === 'approve' ? 'approved' : 'rejected'
+    actionMessage.value = response.data.message || `Transaction ${pastAction} successfully.`
+    actionDialog.value = null
+    await loadTransactions(pagination.value.page)
+  } catch (requestError) {
+    const status = requestError.response?.status
+    if (handleAuthorizationError(status)) {
+      return
+    }
+
+    const responseMessage = requestError.response?.data?.message
+    actionError.value = typeof responseMessage === 'string'
+      ? responseMessage
+      : `Unable to ${pendingAction.action} this transaction. Please try again.`
+  } finally {
+    actionInProgress.value = false
+  }
 }
 
 onMounted(async () => {
@@ -191,6 +254,12 @@ onMounted(async () => {
           </div>
         </form>
 
+        <div v-if="actionMessage" class="state-card success-card" role="status">
+          {{ actionMessage }}
+        </div>
+        <div v-if="actionError && !actionDialog" class="state-card error-card action-error" role="alert">
+          {{ actionError }}
+        </div>
         <div v-if="error" class="state-card error-card" role="alert">
           <p>{{ error }}</p>
           <button
@@ -223,6 +292,7 @@ onMounted(async () => {
                   <th scope="col">Status</th>
                   <th scope="col">Created By</th>
                   <th scope="col">Created At</th>
+                  <th scope="col">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -236,6 +306,28 @@ onMounted(async () => {
                   </td>
                   <td>{{ transaction.created_by }}</td>
                   <td class="date-cell">{{ formatDate(transaction.created_at) }}</td>
+                  <td class="action-cell">
+                    <div class="row-actions">
+                      <button
+                        class="button button-primary action-button"
+                        type="button"
+                        :disabled="actionInProgress || transaction.created_by === username"
+                        :title="transaction.created_by === username ? 'Makers cannot authorize their own transactions.' : 'Approve transaction'"
+                        @click="openActionDialog(transaction, 'approve')"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        class="button button-danger action-button"
+                        type="button"
+                        :disabled="actionInProgress || transaction.created_by === username"
+                        :title="transaction.created_by === username ? 'Makers cannot authorize their own transactions.' : 'Reject transaction'"
+                        @click="openActionDialog(transaction, 'reject')"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -265,6 +357,76 @@ onMounted(async () => {
             </div>
           </nav>
         </template>
+      </section>
+    </div>
+
+    <div
+      v-if="actionDialog"
+      class="dialog-backdrop"
+      role="presentation"
+      @click.self="!actionInProgress && (actionDialog = null)"
+    >
+      <section
+        class="action-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="action-dialog-heading"
+        :aria-busy="actionInProgress"
+      >
+        <p class="eyebrow">Transaction Authorization</p>
+        <h2 id="action-dialog-heading">
+          {{ actionDialog.action === 'approve' ? 'Confirm approval' : 'Confirm rejection' }}
+        </h2>
+        <p class="dialog-description">
+          Are you sure you want to {{ actionDialog.action }} this transaction?
+        </p>
+        <div v-if="actionError" class="state-card error-card dialog-error" role="alert">
+          {{ actionError }}
+        </div>
+        <dl class="transaction-summary">
+          <div>
+            <dt>Transaction ID</dt>
+            <dd>{{ actionDialog.transaction.transaction_id }}</dd>
+          </div>
+          <div>
+            <dt>Type</dt>
+            <dd>{{ actionDialog.transaction.transaction_type }}</dd>
+          </div>
+          <div>
+            <dt>Amount</dt>
+            <dd>{{ formatAmount(actionDialog.transaction.amount) }}</dd>
+          </div>
+        </dl>
+        <label v-if="actionDialog.action === 'reject'" class="filter-field reason-field">
+          <span>Reason (optional)</span>
+          <textarea
+            v-model="actionDialog.reason"
+            name="rejection_reason"
+            maxlength="500"
+            rows="3"
+            placeholder="Enter a reason for rejecting this transaction"
+            :disabled="actionInProgress"
+          ></textarea>
+        </label>
+        <div class="dialog-actions">
+          <button
+            class="button button-secondary"
+            type="button"
+            :disabled="actionInProgress"
+            @click="actionDialog = null"
+          >
+            Cancel
+          </button>
+          <button
+            class="button"
+            :class="actionDialog.action === 'approve' ? 'button-primary' : 'button-danger'"
+            type="button"
+            :disabled="actionInProgress"
+            @click="submitTransactionAction"
+          >
+            {{ actionInProgress ? 'Submitting...' : actionDialog.action === 'approve' ? 'Confirm approval' : 'Confirm rejection' }}
+          </button>
+        </div>
       </section>
     </div>
   </section>
@@ -490,6 +652,15 @@ onMounted(async () => {
   background: #f1f5f9;
 }
 
+.button-danger {
+  background: #a12e24;
+  color: #fff;
+}
+
+.button-danger:hover:not(:disabled) {
+  background: #84241d;
+}
+
 .table-scroll {
   width: 100%;
   overflow-x: auto;
@@ -499,7 +670,7 @@ onMounted(async () => {
 
 table {
   width: 100%;
-  min-width: 980px;
+  min-width: 1120px;
   border-collapse: collapse;
   text-align: left;
   font-size: 0.83rem;
@@ -552,6 +723,124 @@ tbody tr:hover {
 
 .date-cell {
   color: #5e7086;
+}
+
+.action-cell {
+  white-space: normal;
+}
+
+.row-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.action-button {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+}
+
+.action-error {
+  margin-bottom: 16px;
+}
+
+.dialog-error {
+  min-height: 0;
+  justify-content: flex-start;
+  margin-bottom: 14px;
+  text-align: left;
+}
+
+.success-card {
+  margin-bottom: 16px;
+  border-color: #cfe5d8;
+  background: #f3faf6;
+  color: #28734c;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(15 31 49 / 52%);
+}
+
+.action-dialog {
+  width: min(100%, 480px);
+  padding: 26px;
+  border: 1px solid #e5eaf0;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 55px rgb(10 30 52 / 25%);
+}
+
+.action-dialog h2 {
+  margin: 0;
+  color: #123b68;
+  font-size: 1.3rem;
+}
+
+.dialog-description {
+  margin: 10px 0 18px;
+  color: #62738a;
+}
+
+.transaction-summary {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 18px;
+  padding: 14px;
+  border: 1px solid #e8edf2;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.transaction-summary div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.transaction-summary dt {
+  color: #64758b;
+  font-size: 0.82rem;
+}
+
+.transaction-summary dd {
+  margin: 0;
+  color: #243449;
+  font-size: 0.84rem;
+  font-weight: 600;
+  text-align: right;
+}
+
+.reason-field {
+  margin-bottom: 18px;
+}
+
+.reason-field textarea {
+  width: 100%;
+  min-height: 84px;
+  padding: 9px 11px;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  color: #25364a;
+  font: inherit;
+  resize: vertical;
+}
+
+.reason-field textarea:focus {
+  border-color: #2874b9;
+  outline: 3px solid rgb(40 116 185 / 15%);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
 }
 
 .pagination {
