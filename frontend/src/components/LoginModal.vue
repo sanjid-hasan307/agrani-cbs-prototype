@@ -17,19 +17,24 @@
         v-model="username"
         type="text"
         placeholder="User ID"
+        autocomplete="username"
+        :disabled="submitting"
       />
 
       <input
         v-model="password"
         type="password"
         placeholder="Password"
+        autocomplete="current-password"
+        :disabled="submitting"
       />
 
       <button
         class="submit-btn"
         @click="login"
+        :disabled="submitting"
       >
-        Sign In
+        {{ submitting ? 'Signing in...' : 'Sign In' }}
       </button>
 
       <p v-if="error" class="error">
@@ -58,11 +63,16 @@ const username = ref('')
 const password = ref('')
 
 const error = ref('')
+const submitting = ref(false)
 
 const authStore = useAuthStore()
 
 
 async function login() {
+  if (submitting.value) return
+
+  submitting.value = true
+  error.value = ''
   try {
     // Get CSRF cookie before submitting credentials
     await api.get('/csrf/')
@@ -74,30 +84,28 @@ async function login() {
       }
     )
 
-
     if (response.data.success) {
-
-      authStore.setUser(
-        response.data
-      )
-
-      error.value = ""
-
       if (response.data.role === 'Manager') {
+        authStore.setUser(response.data)
         await router.replace('/dashboard/manager')
         emit('close')
+      } else if (response.data.role === 'Teller') {
+        authStore.setUser(response.data)
+        await router.replace('/dashboard/teller')
+        emit('close')
       } else {
-        error.value = "Dashboard for this role is not available yet."
+        authStore.logout()
+        error.value = 'Your account does not have a supported dashboard role. Please contact an administrator.'
       }
-
+    } else {
+      error.value = response.data.message || 'Login failed. Please check your credentials.'
     }
-
-
-  } catch (err) {
-    error.value = "Login failed"
-
+  } catch (requestError) {
+    error.value = requestError.response?.data?.message
+      || 'Login failed. Please check your credentials and try again.'
+  } finally {
+    submitting.value = false
   }
-
 }
 
 </script>
@@ -116,6 +124,11 @@ async function login() {
 
   background:rgba(0,0,0,.4);
 
+}
+
+.submit-btn:disabled {
+  cursor: wait;
+  opacity: .7;
 }
 
 

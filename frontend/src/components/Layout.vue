@@ -33,7 +33,7 @@ import BankFooter from './BankFooter.vue'
 
   flex-direction:column;
 
-  background:#f5f7fa;
+  background:#f4f6f9;
 
 }
 

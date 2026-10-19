@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import LoginView from '../views/LoginView.vue'
 import ManagerDashboard from '../views/ManagerDashboard.vue'
+import TellerDashboard from '../views/TellerDashboard.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -21,6 +22,11 @@ const router = createRouter({
       path: '/dashboard/manager',
       name: 'ManagerDashboard',
       component: ManagerDashboard
+    },
+    {
+      path: '/dashboard/teller',
+      name: 'TellerDashboard',
+      component: TellerDashboard
     }
   ]
 })

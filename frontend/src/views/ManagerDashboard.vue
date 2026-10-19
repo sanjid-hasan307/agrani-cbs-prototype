@@ -2,12 +2,15 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../services/api'
+import { useAuthStore } from '../stores/auth'
 
 const router = useRouter()
+const authStore = useAuthStore()
 
 const verifying = ref(true)
 const authorized = ref(false)
 const username = ref('')
+const branchName = ref('')
 const loading = ref(false)
 const error = ref('')
 const actionError = ref('')
@@ -172,6 +175,7 @@ onMounted(async () => {
     if (response.data.success && response.data.role === 'Manager') {
       authorized.value = true
       username.value = response.data.username
+      branchName.value = authStore.branch || ''
       await loadTransactions(1)
     } else {
       router.replace('/login')
@@ -197,27 +201,50 @@ onMounted(async () => {
     <div v-else-if="authorized" class="dashboard-content">
       <div class="page-heading">
         <div>
-          <p class="eyebrow">Core Banking System</p>
-          <h1>Manager Dashboard</h1>
-          <p class="welcome">Welcome, <strong>{{ username }}</strong></p>
+          <h1>Welcome, {{ username }}</h1>
+          <p class="welcome">Role: <strong>Branch Manager</strong></p>
         </div>
-        <span class="secure-label"><span aria-hidden="true">●</span> Secure Manager Access</span>
       </div>
 
-      <div class="summary-card" aria-live="polite">
-        <div class="summary-icon" aria-hidden="true">₳</div>
-        <div>
-          <p class="summary-label">Pending Authorizations</p>
-          <p class="summary-count">{{ pendingCount }}</p>
+      <div class="overview-grid">
+        <section class="branch-card" aria-labelledby="branch-heading">
+          <h2 id="branch-heading" class="card-heading">Branch Information</h2>
+          <div v-if="branchName" class="branch-details">
+            <div>
+              <span>Branch Code</span>
+              <strong>Not provided</strong>
+            </div>
+            <div>
+              <span>Branch Name</span>
+              <strong>{{ branchName }}</strong>
+            </div>
+            <div>
+              <span>District</span>
+              <strong>Not provided</strong>
+            </div>
+          </div>
+          <p v-else class="branch-unavailable">
+            No branch assigned or branch information is unavailable.
+          </p>
+          <p v-if="branchName" class="branch-note">
+            Branch code and district are not included in the current Manager session data.
+          </p>
+        </section>
+
+        <div class="summary-card" aria-live="polite">
+          <div class="summary-icon" aria-hidden="true">⌛</div>
+          <div>
+            <p class="summary-label">Pending Authorizations</p>
+            <p class="summary-count">{{ pendingCount }}</p>
+          </div>
+          <span class="summary-caption">Awaiting review</span>
         </div>
-        <span class="summary-caption">Awaiting review</span>
       </div>
 
       <section class="transactions-card" aria-labelledby="pending-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">Authorization Queue</p>
-            <h2 id="pending-heading">Pending Transactions</h2>
+            <h2 id="pending-heading">Pending Transactions for Approval</h2>
           </div>
           <span class="queue-count">{{ pendingCount }} pending</span>
         </div>
@@ -437,13 +464,13 @@ onMounted(async () => {
   width: 100%;
   max-width: 1440px;
   margin: 0 auto;
-  padding: 38px clamp(18px, 4vw, 56px) 56px;
+  padding: 24px clamp(16px, 4vw, 40px) 40px;
   color: #243449;
 }
 
 .dashboard-content {
   display: grid;
-  gap: 24px;
+  gap: 16px;
 }
 
 .page-heading,
@@ -463,104 +490,156 @@ onMounted(async () => {
 }
 
 .page-heading h1 {
-  font-size: clamp(1.65rem, 3vw, 2.1rem);
+  font-size: clamp(1.25rem, 2vw, 1.5rem);
 }
 
-.eyebrow {
-  margin: 0 0 6px;
-  color: #708198;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+.page-heading {
+  margin-bottom: 2px;
 }
 
 .welcome {
-  margin: 8px 0 0;
+  margin: 4px 0 0;
   color: #62738a;
+  font-size: .85rem;
 }
 
 .welcome strong {
   color: #243449;
 }
 
-.secure-label {
-  flex-shrink: 0;
-  padding: 9px 14px;
-  border: 1px solid #dce8e2;
-  border-radius: 999px;
-  background: #f3faf6;
-  color: #28734c;
-  font-size: 0.82rem;
+.eyebrow {
+  margin: 0 0 5px;
+  color: #708198;
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  gap: 16px;
+}
+
+.branch-card,
+.summary-card,
+.transactions-card {
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 7%);
+}
+
+.branch-card {
+  min-width: 0;
+  padding: 18px 20px;
+  background: #fff;
+}
+
+.card-heading {
+  margin: 0 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #e2e8f0;
+  color: #334155;
+  font-size: .95rem;
   font-weight: 600;
 }
 
-.secure-label span {
-  margin-right: 6px;
+.branch-details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.branch-details div {
+  display: grid;
+  gap: 3px;
+}
+
+.branch-details span,
+.branch-note,
+.branch-unavailable {
+  color: #64748b;
+  font-size: .76rem;
+}
+
+.branch-details strong {
+  color: #26364a;
+  font-size: .88rem;
+  overflow-wrap: anywhere;
+}
+
+.branch-note {
+  margin: 10px 0 0;
+}
+
+.branch-unavailable {
+  margin: 0;
 }
 
 .summary-card {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 16px;
-  min-height: 132px;
-  padding: 24px;
+  gap: 14px;
+  min-height: 112px;
+  padding: 18px;
   overflow: hidden;
   border-radius: 12px;
-  background: linear-gradient(115deg, #07509a, #003b7a 72%);
-  box-shadow: 0 8px 22px rgb(0 59 122 / 14%);
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 7%);
   color: #fff;
 }
 
 .summary-icon {
   display: grid;
-  width: 54px;
-  height: 54px;
+  width: 46px;
+  height: 46px;
   flex-shrink: 0;
   place-items: center;
   border: 1px solid rgb(255 255 255 / 25%);
   border-radius: 12px;
   background: rgb(255 255 255 / 12%);
-  font-size: 1.7rem;
+  font-size: 1.45rem;
   font-weight: 700;
 }
 
 .summary-label {
   margin: 0;
   color: rgb(255 255 255 / 80%);
-  font-size: 0.9rem;
+  font-size: 0.78rem;
 }
 
 .summary-count {
   margin: 2px 0 0;
-  font-size: 2rem;
+  font-size: 1.8rem;
   font-weight: 700;
   line-height: 1.15;
 }
 
 .summary-caption {
   margin-left: auto;
-  align-self: flex-end;
+  align-self: center;
   color: rgb(255 255 255 / 76%);
-  font-size: 0.82rem;
+  font-size: 0.72rem;
+  text-align: right;
 }
 
 .transactions-card {
   min-width: 0;
-  padding: clamp(18px, 3vw, 28px);
-  border: 1px solid #e5eaf0;
+  padding: 18px;
+  border: 0;
   border-radius: 12px;
   background: #fff;
-  box-shadow: 0 4px 14px rgb(30 52 77 / 5%);
 }
 
 .section-heading {
-  margin-bottom: 22px;
+  margin-bottom: 14px;
 }
 
 .section-heading h2 {
-  font-size: 1.25rem;
+  color: #334155;
+  font-size: .98rem;
+  font-weight: 600;
 }
 
 .queue-count {
@@ -576,28 +655,28 @@ onMounted(async () => {
 .filters {
   display: flex;
   align-items: flex-end;
-  gap: 14px;
-  margin-bottom: 22px;
-  padding: 16px;
-  border: 1px solid #e8edf2;
-  border-radius: 9px;
-  background: #f8fafc;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 0;
+  border-radius: 7px;
+  background: #f8f9fb;
 }
 
 .filter-field {
   display: grid;
   flex: 1 1 230px;
-  gap: 6px;
+  gap: 4px;
   color: #53657b;
-  font-size: 0.78rem;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
 .filter-field input,
 .filter-field select {
   width: 100%;
-  min-height: 40px;
-  padding: 8px 11px;
+  min-height: 34px;
+  padding: 6px 9px;
   border: 1px solid #cfd8e3;
   border-radius: 6px;
   background: #fff;
@@ -618,8 +697,8 @@ onMounted(async () => {
 }
 
 .button {
-  min-height: 40px;
-  padding: 8px 14px;
+  min-height: 34px;
+  padding: 6px 11px;
   border: 1px solid transparent;
   border-radius: 6px;
   font: inherit;
@@ -634,12 +713,12 @@ onMounted(async () => {
 }
 
 .button-primary {
-  background: #003b7a;
+  background: #0d6efd;
   color: #fff;
 }
 
 .button-primary:hover:not(:disabled) {
-  background: #07509a;
+  background: #0a58ca;
 }
 
 .button-secondary {
@@ -653,40 +732,40 @@ onMounted(async () => {
 }
 
 .button-danger {
-  background: #a12e24;
+  background: #dc3545;
   color: #fff;
 }
 
 .button-danger:hover:not(:disabled) {
-  background: #84241d;
+  background: #bb2d3b;
 }
 
 .table-scroll {
   width: 100%;
   overflow-x: auto;
-  border: 1px solid #e5eaf0;
+  border: 0;
   border-radius: 8px;
 }
 
 table {
   width: 100%;
-  min-width: 1120px;
+  min-width: 980px;
   border-collapse: collapse;
   text-align: left;
-  font-size: 0.83rem;
+  font-size: 0.78rem;
 }
 
 th {
-  padding: 13px 14px;
-  background: #f2f6fa;
+  padding: 9px 10px;
+  background: #f1f3f5;
   color: #53657b;
-  font-size: 0.73rem;
+  font-size: 0.7rem;
   font-weight: 700;
   white-space: nowrap;
 }
 
 td {
-  padding: 14px;
+  padding: 9px 10px;
   border-top: 1px solid #edf0f4;
   color: #33465d;
   white-space: nowrap;
@@ -713,11 +792,11 @@ tbody tr:hover {
 
 .status-badge {
   display: inline-block;
-  padding: 5px 9px;
+  padding: 4px 8px;
   border-radius: 999px;
   background: #fff5df;
   color: #875900;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 700;
 }
 
@@ -848,7 +927,7 @@ tbody tr:hover {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-top: 18px;
+  margin-top: 12px;
 }
 
 .page-summary {
@@ -912,7 +991,7 @@ tbody tr:hover {
 
 @media (max-width: 700px) {
   .manager-dashboard {
-    padding-top: 26px;
+    padding-top: 18px;
   }
 
   .page-heading,
@@ -920,8 +999,12 @@ tbody tr:hover {
     align-items: flex-start;
   }
 
-  .secure-label {
-    display: none;
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-card {
+    min-height: 92px;
   }
 
   .filters {
@@ -939,8 +1022,17 @@ tbody tr:hover {
 }
 
 @media (max-width: 420px) {
+  .branch-card,
+  .transactions-card {
+    padding: 14px;
+  }
+
+  .branch-details {
+    grid-template-columns: 1fr;
+  }
+
   .summary-card {
-    padding: 18px;
+    padding: 14px;
   }
 
   .summary-caption {
