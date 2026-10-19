@@ -71,12 +71,15 @@ class ManagerApiTestCase(TestCase):
         *,
         authorization_status=None,
         created_by=None,
+        transaction_type=Transaction.TransactionType.DEPOSIT,
+        status=Transaction.Status.PENDING,
     ):
         fields = {
-            "transaction_type": Transaction.TransactionType.DEPOSIT,
+            "transaction_type": transaction_type,
             "account": account,
             "amount": Decimal("123.45"),
             "created_by": created_by or self.teller,
+            "status": status,
         }
         if authorization_status is not None:
             fields["authorization_status"] = authorization_status
@@ -111,6 +114,7 @@ class ManagerPendingTransactionsApiTests(ManagerApiTestCase):
         self.assertEqual(
             data["transactions"][0],
             {
+                "id": transaction.pk,
                 "transaction_id": transaction.transaction_id,
                 "transaction_type": Transaction.TransactionType.DEPOSIT,
                 "account_number": self.account_a.account_number,
@@ -205,6 +209,111 @@ class ManagerPendingTransactionsApiTests(ManagerApiTestCase):
         response = self.client.post(self.endpoint)
 
         self.assertEqual(response.status_code, 405)
+
+
+class TellerApiTests(ManagerApiTestCase):
+    session_endpoint = "/api/teller/session/"
+    transactions_endpoint = "/api/teller/transactions/"
+
+    def setUp(self):
+        super().setUp()
+        StaffProfile.objects.create(
+            user=self.teller,
+            employee_id="API-TEL-001",
+            branch=self.branch_a,
+        )
+
+    def test_teller_session_returns_minimal_identity_and_branch(self):
+        self.client.force_login(self.teller)
+
+        response = self.client.get(self.session_endpoint)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "success": True,
+            "username": self.teller.username,
+            "role": "Teller",
+            "branch": self.branch_a.branch_name,
+        })
+
+    def test_teller_session_requires_authentication_and_role(self):
+        response = self.client.get(self.session_endpoint)
+        self.assertEqual(response.status_code, 401)
+
+        self.client.force_login(self.manager)
+        response = self.client.get(self.session_endpoint)
+        self.assertEqual(response.status_code, 403)
+
+    def test_teller_history_is_scoped_and_exposes_only_required_fields(self):
+        own_transaction = self._create_transaction(self.account_a)
+        self._create_transaction(self.account_a, created_by=self.manager)
+        self.client.force_login(self.teller)
+
+        response = self.client.get(self.transactions_endpoint)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["pagination"]["total_items"], 1)
+        self.assertEqual(len(data["transactions"]), 1)
+        self.assertEqual(data["transactions"][0], {
+            "id": own_transaction.pk,
+            "transaction_id": own_transaction.transaction_id,
+            "transaction_type": Transaction.TransactionType.DEPOSIT,
+            "account_number": self.account_a.account_number,
+            "amount": "123.45",
+            "status": Transaction.Status.PENDING,
+            "authorization_status": Transaction.AuthorizationStatus.PENDING,
+            "created_at": own_transaction.created_at.isoformat(),
+        })
+
+    def test_teller_history_supports_existing_filters(self):
+        matching_transaction = self._create_transaction(
+            self.account_a,
+            transaction_type=Transaction.TransactionType.DEPOSIT,
+            status=Transaction.Status.PENDING,
+        )
+        self._create_transaction(
+            self.account_b,
+            transaction_type=Transaction.TransactionType.WITHDRAWAL,
+            status=Transaction.Status.REJECTED,
+        )
+        self.client.force_login(self.teller)
+
+        response = self.client.get(self.transactions_endpoint, {
+            "account_number": self.account_a.account_number,
+            "transaction_type": Transaction.TransactionType.DEPOSIT,
+            "status": Transaction.Status.PENDING,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in response.json()["transactions"]],
+            [matching_transaction.pk],
+        )
+
+    def test_teller_history_is_paginated_in_pages_of_ten(self):
+        for _ in range(11):
+            self._create_transaction(self.account_a)
+        self.client.force_login(self.teller)
+
+        first_page = self.client.get(self.transactions_endpoint)
+        second_page = self.client.get(self.transactions_endpoint, {"page": 2})
+
+        self.assertEqual(first_page.status_code, 200)
+        self.assertEqual(first_page.json()["pagination"]["total_items"], 11)
+        self.assertEqual(len(first_page.json()["transactions"]), 10)
+        self.assertTrue(first_page.json()["pagination"]["has_next"])
+        self.assertEqual(second_page.status_code, 200)
+        self.assertEqual(len(second_page.json()["transactions"]), 1)
+        self.assertEqual(second_page.json()["pagination"]["page"], 2)
+
+    def test_teller_history_requires_authentication_and_role(self):
+        response = self.client.get(self.transactions_endpoint)
+        self.assertEqual(response.status_code, 401)
+
+        self.client.force_login(self.manager)
+        response = self.client.get(self.transactions_endpoint)
+        self.assertEqual(response.status_code, 403)
 
 
 class ManagerTransactionActionApiTests(ManagerApiTestCase):

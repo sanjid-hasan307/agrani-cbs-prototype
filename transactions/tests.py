@@ -8,7 +8,6 @@ from django.db import close_old_connections, connection
 from django.test import Client, TestCase, TransactionTestCase
 from django.core.exceptions import ValidationError
 from django.contrib.auth.models import User, Group
-from rest_framework.test import APIClient
 from rest_framework import status
 from branches.models import Branch
 from users.models import StaffProfile
@@ -161,6 +160,8 @@ class DepositServiceTest(TestCase):
             is_active=True,
         )
         self.user = User.objects.create_user(username="teller1", password="Password123!")
+        teller_group, _ = Group.objects.get_or_create(name="Teller")
+        self.user.groups.add(teller_group)
         StaffProfile.objects.create(user=self.user, employee_id="EMP_DEP_T1", branch=self.branch, is_active=True)
         self.manager_group, _ = Group.objects.get_or_create(name='Manager')
         self.manager = User.objects.create_user(username="manager1", password="Password123!")
@@ -268,21 +269,308 @@ class DepositServiceTest(TestCase):
         self.assertIn("positive", str(ctx.exception))
 
     def test_deposit_api_endpoint(self):
-        client = APIClient()
-        client.force_authenticate(user=self.user)
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.user)
+        client.get("/api/csrf/")
+        csrf_token = client.cookies["csrftoken"].value
 
-        response = client.post('/api/transactions/deposit/', {
-            "account_number": self.account.account_number,
-            "amount": "2500.00",
-            "description": "Counter deposit API",
-        }, format='json')
+        response = client.post(
+            '/api/transactions/deposit/',
+            data={
+                "account_number": self.account.account_number,
+                "amount": "2500.00",
+                "description": "Counter deposit API",
+            },
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data['account_number'], self.account.account_number)
+        self.assertEqual(response.json()['account_number'], self.account.account_number)
+        txn = Transaction.objects.get(account=self.account)
+        self.assertEqual(txn.status, Transaction.Status.PENDING)
+        self.assertEqual(
+            txn.authorization_status,
+            Transaction.AuthorizationStatus.PENDING,
+        )
 
         # Balance is still 0.00 until approval
         self.account.refresh_from_db()
         self.assertEqual(self.account.available_balance, Decimal("0.00"))
+
+
+class TellerOperationApiTests(TestCase):
+    deposit_url = "/api/transactions/deposit/"
+    withdraw_url = "/api/transactions/withdraw/"
+    transfer_url = "/api/transactions/transfer/"
+
+    def setUp(self):
+        self.branch_a = Branch.objects.create(
+            branch_code="API-OPS-A",
+            branch_name="Operations Branch A",
+            district="Dhaka",
+            address="Branch A",
+        )
+        self.branch_b = Branch.objects.create(
+            branch_code="API-OPS-B",
+            branch_name="Operations Branch B",
+            district="Chattogram",
+            address="Branch B",
+        )
+        teller_group, _ = Group.objects.get_or_create(name="Teller")
+        manager_group, _ = Group.objects.get_or_create(name="Manager")
+        self.teller = User.objects.create_user(username="operations_teller")
+        self.teller.groups.add(teller_group)
+        StaffProfile.objects.create(
+            user=self.teller,
+            employee_id="EMP-OPS-T1",
+            branch=self.branch_a,
+            is_active=True,
+        )
+        self.manager = User.objects.create_user(username="operations_manager")
+        self.manager.groups.add(manager_group)
+
+        self.product = AccountProduct.objects.create(
+            product_code="OPS-SAV",
+            product_name="Operations Savings",
+            minimum_balance=Decimal("0.00"),
+        )
+        self.account_a = self._create_account(
+            self.branch_a,
+            "API-OPS-ACC-A",
+            Decimal("5000.00"),
+        )
+        self.account_b = self._create_account(
+            self.branch_b,
+            "API-OPS-ACC-B",
+            Decimal("9000.00"),
+        )
+
+    def _create_account(self, branch, account_number, balance):
+        customer = Customer.objects.create(
+            full_name=f"Customer {account_number}",
+            phone=f"017{account_number[-8:]}",
+            nid_number=f"NID-{account_number}",
+            present_address="Test address",
+            district=branch.district,
+            home_branch=branch,
+            created_by=self.teller,
+        )
+        return Account.objects.create(
+            customer=customer,
+            product=self.product,
+            branch=branch,
+            account_number=account_number,
+            available_balance=balance,
+            ledger_balance=balance,
+        )
+
+    def _session_client(self, user, *, csrf=True):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(user)
+        csrf_token = None
+        if csrf:
+            client.get("/api/csrf/")
+            csrf_token = client.cookies["csrftoken"].value
+        return client, csrf_token
+
+    def _post_json(self, client, csrf_token, url, payload):
+        headers = {}
+        if csrf_token:
+            headers["HTTP_X_CSRFTOKEN"] = csrf_token
+        return client.post(
+            url,
+            data=payload,
+            content_type="application/json",
+            **headers,
+        )
+
+    def test_non_teller_users_are_denied_all_operation_endpoints(self):
+        client, csrf_token = self._session_client(self.manager)
+        requests = (
+            (self.deposit_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "100.00",
+            }),
+            (self.withdraw_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "100.00",
+            }),
+            (self.transfer_url, {
+                "from_account_number": self.account_a.account_number,
+                "to_account_number": self.account_b.account_number,
+                "amount": "100.00",
+            }),
+        )
+
+        for url, payload in requests:
+            with self.subTest(url=url):
+                response = self._post_json(client, csrf_token, url, payload)
+                self.assertEqual(response.status_code, 403)
+                self.assertFalse(response.json()["success"])
+                self.assertIn("message", response.json())
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_unauthenticated_users_are_denied_all_operation_endpoints(self):
+        client = Client(enforce_csrf_checks=True)
+        requests = (
+            (self.deposit_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "100.00",
+            }),
+            (self.withdraw_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "100.00",
+            }),
+            (self.transfer_url, {
+                "from_account_number": self.account_a.account_number,
+                "to_account_number": self.account_b.account_number,
+                "amount": "100.00",
+            }),
+        )
+
+        for url, payload in requests:
+            with self.subTest(url=url):
+                response = self._post_json(client, None, url, payload)
+                self.assertEqual(response.status_code, 403)
+                self.assertFalse(response.json()["success"])
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_teller_operations_remain_pending_and_do_not_change_balances(self):
+        client, csrf_token = self._session_client(self.teller)
+        initial_balances = (
+            self.account_a.available_balance,
+            self.account_a.ledger_balance,
+            self.account_b.available_balance,
+            self.account_b.ledger_balance,
+        )
+        requests = (
+            (self.deposit_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "100.00",
+                "description": "API deposit",
+            }),
+            (self.withdraw_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "100.00",
+                "description": "API withdrawal",
+            }),
+            (self.transfer_url, {
+                "from_account_number": self.account_a.account_number,
+                "to_account_number": self.account_b.account_number,
+                "amount": "100.00",
+                "description": "API transfer",
+            }),
+        )
+
+        for url, payload in requests:
+            with self.subTest(url=url):
+                response = self._post_json(client, csrf_token, url, payload)
+                self.assertEqual(response.status_code, 201)
+                self.assertTrue(response.json()["success"])
+                self.assertEqual(
+                    response.json()["status"],
+                    Transaction.Status.PENDING,
+                )
+                self.assertEqual(
+                    response.json()["authorization_status"],
+                    Transaction.AuthorizationStatus.PENDING,
+                )
+
+        self.assertEqual(Transaction.objects.filter(created_by=self.teller).count(), 3)
+        self.account_a.refresh_from_db()
+        self.account_b.refresh_from_db()
+        self.assertEqual(
+            (
+                self.account_a.available_balance,
+                self.account_a.ledger_balance,
+                self.account_b.available_balance,
+                self.account_b.ledger_balance,
+            ),
+            initial_balances,
+        )
+        for action in ("CREATE_DEPOSIT", "CREATE_WITHDRAWAL", "CREATE_TRANSFER"):
+            with self.subTest(audit_action=action):
+                self.assertTrue(AuditLog.objects.filter(
+                    user=self.teller,
+                    action=action,
+                ).exists())
+
+    def test_branch_restrictions_are_preserved_by_api_operations(self):
+        client, csrf_token = self._session_client(self.teller)
+        requests = (
+            (self.deposit_url, {
+                "account_number": self.account_b.account_number,
+                "amount": "100.00",
+            }),
+            (self.withdraw_url, {
+                "account_number": self.account_b.account_number,
+                "amount": "100.00",
+            }),
+            (self.transfer_url, {
+                "from_account_number": self.account_b.account_number,
+                "to_account_number": self.account_a.account_number,
+                "amount": "100.00",
+            }),
+        )
+
+        for url, payload in requests:
+            with self.subTest(url=url):
+                response = self._post_json(client, csrf_token, url, payload)
+                self.assertEqual(response.status_code, 403)
+                self.assertFalse(response.json()["success"])
+        self.assertFalse(Transaction.objects.exists())
+        self.assertFalse(AuditLog.objects.exists())
+
+    def test_invalid_requests_return_json_validation_errors_without_transactions(self):
+        client, csrf_token = self._session_client(self.teller)
+        requests = (
+            (self.deposit_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "0.00",
+            }),
+            (self.withdraw_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "10000.00",
+            }),
+            (self.transfer_url, {
+                "from_account_number": self.account_a.account_number,
+                "to_account_number": self.account_a.account_number,
+                "amount": "100.00",
+            }),
+        )
+
+        for url, payload in requests:
+            with self.subTest(url=url):
+                response = self._post_json(client, csrf_token, url, payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(response.json()["success"])
+        self.assertFalse(Transaction.objects.exists())
+
+    def test_csrf_is_required_for_each_operation_endpoint(self):
+        client, _ = self._session_client(self.teller, csrf=False)
+        requests = (
+            (self.deposit_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "100.00",
+            }),
+            (self.withdraw_url, {
+                "account_number": self.account_a.account_number,
+                "amount": "100.00",
+            }),
+            (self.transfer_url, {
+                "from_account_number": self.account_a.account_number,
+                "to_account_number": self.account_b.account_number,
+                "amount": "100.00",
+            }),
+        )
+
+        for url, payload in requests:
+            with self.subTest(url=url):
+                response = self._post_json(client, None, url, payload)
+                self.assertEqual(response.status_code, 403)
+                self.assertTrue(response.json())
+        self.assertFalse(Transaction.objects.exists())
 
 
 class WithdrawalServiceTest(TestCase):
@@ -1341,5 +1629,4 @@ class TransactionBranchAccessControlTest(TestCase):
             created_by=self.superuser,
         )
         self.assertEqual(trf_txn.status, Transaction.Status.PENDING)
-
 

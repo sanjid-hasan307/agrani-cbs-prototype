@@ -1,7 +1,9 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.permissions import BasePermission, IsAuthenticated
+from django.core.exceptions import ValidationError
 from accounts.models import Account
 from transactions.models import Transaction
 from transactions.serializers import DepositSerializer, WithdrawSerializer, TransferSerializer
@@ -9,103 +11,158 @@ from transactions.services.deposit_service import deposit
 from transactions.services.withdrawal_service import withdraw
 from transactions.services.transfer_service import transfer
 from transactions.services.authorization_service import approve_transaction, reject_transaction
+from users.views import get_user_role
 
 
-class DepositAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+class IsTeller(BasePermission):
+    message = "Teller access required."
+
+    def has_permission(self, request, view):
+        return get_user_role(request.user) == "Teller"
+
+
+def _validation_error_response(error):
+    message = "; ".join(error.messages)
+    error_fields = getattr(error, "message_dict", {})
+    response_status = (
+        status.HTTP_403_FORBIDDEN
+        if "created_by" in error_fields
+        else status.HTTP_400_BAD_REQUEST
+    )
+    return Response(
+        {"success": False, "message": message},
+        status=response_status,
+    )
+
+
+def _serializer_error_response(serializer):
+    return Response(
+        {
+            "success": False,
+            "message": "Request validation failed.",
+            "errors": serializer.errors,
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+class TellerOperationAPIView(APIView):
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAuthenticated, IsTeller]
+
+    def handle_exception(self, exc):
+        response = super().handle_exception(exc)
+        if response is not None and "detail" in response.data:
+            response.data = {
+                "success": False,
+                "message": str(response.data["detail"]),
+            }
+        return response
+
+
+class DepositAPIView(TellerOperationAPIView):
 
     def post(self, request, *args, **kwargs):
         serializer = DepositSerializer(data=request.data)
-        if serializer.is_valid():
-            account = Account.objects.get(account_number=serializer.validated_data['account_number'])
-            amount = serializer.validated_data['amount']
-            description = serializer.validated_data.get('description', '')
+        if not serializer.is_valid():
+            return _serializer_error_response(serializer)
 
-            try:
-                txn = deposit(
-                    account=account,
-                    amount=amount,
-                    created_by=request.user,
-                    description=description,
-                )
-                account.refresh_from_db()
-                return Response({
-                    "message": "Deposit successful.",
-                    "transaction_id": txn.transaction_id,
-                    "account_number": account.account_number,
-                    "available_balance": str(account.available_balance),
-                    "ledger_balance": str(account.ledger_balance),
-                }, status=status.HTTP_201_CREATED)
-            except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        account = Account.objects.get(
+            account_number=serializer.validated_data['account_number']
+        )
+        try:
+            txn = deposit(
+                account=account,
+                amount=serializer.validated_data['amount'],
+                created_by=request.user,
+                description=serializer.validated_data.get('description', ''),
+            )
+        except ValidationError as error:
+            return _validation_error_response(error)
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        account.refresh_from_db()
+        return Response({
+            "success": True,
+            "message": "Deposit request submitted and pending Manager approval.",
+            "transaction_id": txn.transaction_id,
+            "account_number": account.account_number,
+            "status": txn.status,
+            "authorization_status": txn.authorization_status,
+            "available_balance": str(account.available_balance),
+            "ledger_balance": str(account.ledger_balance),
+        }, status=status.HTTP_201_CREATED)
 
 
-class WithdrawAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+class WithdrawAPIView(TellerOperationAPIView):
 
     def post(self, request, *args, **kwargs):
         serializer = WithdrawSerializer(data=request.data)
-        if serializer.is_valid():
-            account = Account.objects.get(account_number=serializer.validated_data['account_number'])
-            amount = serializer.validated_data['amount']
-            description = serializer.validated_data.get('description', '')
+        if not serializer.is_valid():
+            return _serializer_error_response(serializer)
 
-            try:
-                txn = withdraw(
-                    account=account,
-                    amount=amount,
-                    created_by=request.user,
-                    description=description,
-                )
-                account.refresh_from_db()
-                return Response({
-                    "message": "Withdrawal successful.",
-                    "transaction_id": txn.transaction_id,
-                    "account_number": account.account_number,
-                    "available_balance": str(account.available_balance),
-                    "ledger_balance": str(account.ledger_balance),
-                }, status=status.HTTP_201_CREATED)
-            except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        account = Account.objects.get(
+            account_number=serializer.validated_data['account_number']
+        )
+        try:
+            txn = withdraw(
+                account=account,
+                amount=serializer.validated_data['amount'],
+                created_by=request.user,
+                description=serializer.validated_data.get('description', ''),
+            )
+        except ValidationError as error:
+            return _validation_error_response(error)
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        account.refresh_from_db()
+        return Response({
+            "success": True,
+            "message": "Withdrawal request submitted and pending Manager approval.",
+            "transaction_id": txn.transaction_id,
+            "account_number": account.account_number,
+            "status": txn.status,
+            "authorization_status": txn.authorization_status,
+            "available_balance": str(account.available_balance),
+            "ledger_balance": str(account.ledger_balance),
+        }, status=status.HTTP_201_CREATED)
 
 
-class TransferAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+class TransferAPIView(TellerOperationAPIView):
 
     def post(self, request, *args, **kwargs):
         serializer = TransferSerializer(data=request.data)
-        if serializer.is_valid():
-            from_account = Account.objects.get(account_number=serializer.validated_data['from_account_number'])
-            to_account = Account.objects.get(account_number=serializer.validated_data['to_account_number'])
-            amount = serializer.validated_data['amount']
-            description = serializer.validated_data.get('description', '')
+        if not serializer.is_valid():
+            return _serializer_error_response(serializer)
 
-            try:
-                txn = transfer(
-                    from_account=from_account,
-                    to_account=to_account,
-                    amount=amount,
-                    created_by=request.user,
-                    description=description,
-                )
-                from_account.refresh_from_db()
-                to_account.refresh_from_db()
-                return Response({
-                    "message": "Transfer successful.",
-                    "transaction_id": txn.transaction_id,
-                    "from_account_number": from_account.account_number,
-                    "from_available_balance": str(from_account.available_balance),
-                    "to_account_number": to_account.account_number,
-                    "to_available_balance": str(to_account.available_balance),
-                }, status=status.HTTP_201_CREATED)
-            except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        from_account = Account.objects.get(
+            account_number=serializer.validated_data['from_account_number']
+        )
+        to_account = Account.objects.get(
+            account_number=serializer.validated_data['to_account_number']
+        )
+        try:
+            txn = transfer(
+                from_account=from_account,
+                to_account=to_account,
+                amount=serializer.validated_data['amount'],
+                created_by=request.user,
+                description=serializer.validated_data.get('description', ''),
+            )
+        except ValidationError as error:
+            return _validation_error_response(error)
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        from_account.refresh_from_db()
+        to_account.refresh_from_db()
+        return Response({
+            "success": True,
+            "message": "Transfer request submitted and pending Manager approval.",
+            "transaction_id": txn.transaction_id,
+            "from_account_number": from_account.account_number,
+            "to_account_number": to_account.account_number,
+            "status": txn.status,
+            "authorization_status": txn.authorization_status,
+            "from_available_balance": str(from_account.available_balance),
+            "to_available_balance": str(to_account.available_balance),
+        }, status=status.HTTP_201_CREATED)
 
 
 class ApproveTransactionAPIView(APIView):

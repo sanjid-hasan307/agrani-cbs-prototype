@@ -112,6 +112,88 @@ def manager_session_api(request):
 
 
 @require_GET
+def teller_session_api(request):
+    if not request.user.is_authenticated:
+        return JsonResponse(
+            {"success": False, "message": "Authentication required"},
+            status=401
+        )
+
+    if get_user_role(request.user) != "Teller":
+        return JsonResponse(
+            {"success": False, "message": "Teller access required"},
+            status=403
+        )
+
+    _, branch = get_user_staff_info(request.user)
+    return JsonResponse({
+        "success": True,
+        "username": request.user.username,
+        "role": "Teller",
+        "branch": branch.branch_name if branch else None,
+    })
+
+
+@require_GET
+def teller_transactions_api(request):
+    if not request.user.is_authenticated:
+        return JsonResponse(
+            {"success": False, "message": "Authentication required"},
+            status=401
+        )
+
+    if get_user_role(request.user) != "Teller":
+        return JsonResponse(
+            {"success": False, "message": "Teller access required"},
+            status=403
+        )
+
+    transactions = Transaction.objects.filter(created_by=request.user)
+
+    account_number = request.GET.get("account_number", "").strip()
+    transaction_type = request.GET.get("transaction_type", "").strip()
+    transaction_status = request.GET.get("status", "").strip()
+    if account_number:
+        transactions = transactions.filter(account__account_number=account_number)
+    if transaction_type:
+        transactions = transactions.filter(transaction_type=transaction_type)
+    if transaction_status:
+        transactions = transactions.filter(status=transaction_status)
+
+    transactions = transactions.select_related("account").order_by(
+        "-created_at",
+        "-id",
+    )
+    paginator = Paginator(transactions, 10)
+    page_obj = paginator.get_page(request.GET.get("page"))
+
+    return JsonResponse({
+        "success": True,
+        "pagination": {
+            "page": page_obj.number,
+            "page_size": paginator.per_page,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        },
+        "transactions": [
+            {
+                "id": transaction.pk,
+                "transaction_id": transaction.transaction_id,
+                "transaction_type": transaction.transaction_type,
+                "account_number": transaction.account.account_number,
+                "amount": str(transaction.amount),
+                "status": transaction.status,
+                "authorization_status": transaction.authorization_status,
+                "created_at": transaction.created_at.isoformat(),
+            }
+            for transaction in page_obj.object_list
+        ],
+    })
+
+
+@require_GET
 def manager_pending_transactions_api(request):
     if not request.user.is_authenticated:
         return JsonResponse(
