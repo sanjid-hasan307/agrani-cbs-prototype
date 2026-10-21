@@ -43,6 +43,10 @@ The Vue client uses the following Django API routes:
 | `GET` | `/api/csrf/` | Obtain the CSRF cookie used by the client |
 | `GET` | `/api/teller/session/` | Check the signed-in Teller session |
 | `GET` | `/api/teller/transactions/` | Get the Teller's transaction history |
+| `GET` | `/api/admin/session/` | Check the signed-in Admin session |
+| `GET` | `/api/admin/customers/` | Get a paginated, searchable customer list |
+| `POST` | `/api/admin/customers/` | Register a customer |
+| `GET` | `/api/admin/branches/options/` | Get active branches for Admin forms |
 | `POST` | `/api/transactions/deposit/` | Submit a deposit request |
 | `POST` | `/api/transactions/withdraw/` | Submit a withdrawal request |
 | `POST` | `/api/transactions/transfer/` | Submit a transfer request |
@@ -52,6 +56,89 @@ The Vue client uses the following Django API routes:
 | `POST` | `/api/manager/transactions/<id>/reject/` | Reject a pending request |
 
 The Django URL configuration also includes `/api/transactions/<id>/approve/` and `/api/transactions/<id>/reject/` endpoints.
+
+The Admin customer-list endpoint accepts optional `page` and `search` query parameters. Search is case-insensitive across customer name, CIF number, district, and home branch, and is limited to 100 characters. Invalid page values fall back to the first page, while pages beyond the result range return the last page. The endpoint returns only the internal customer ID, name, customer type, KYC status, customer status, home branch name, and creation timestamp; contact and government identity details are not included.
+
+Example response:
+
+```json
+{
+  "success": true,
+  "pagination": {
+    "page": 1,
+    "page_size": 10,
+    "total_pages": 1,
+    "total_items": 1,
+    "has_next": false,
+    "has_previous": false
+  },
+  "customers": [
+    {
+      "id": 42,
+      "full_name": "Example Customer",
+      "customer_type": "INDIVIDUAL",
+      "kyc_status": "VERIFIED",
+      "status": "ACTIVE",
+      "home_branch": "Dhaka Main Branch",
+      "created_at": "2026-10-21T12:00:00+00:00"
+    }
+  ]
+}
+```
+
+Customer registration requires an active session belonging directly to the Admin group, with no conflicting banking-role group membership, and a valid CSRF token. Send `Content-Type: application/json`. Only the fields below are accepted; CIF, creator, KYC/risk/customer status, and timestamps are assigned by the server.
+
+```json
+{
+  "customer_type": "INDIVIDUAL",
+  "full_name": "Example Individual",
+  "phone": "DEMO-PHONE",
+  "email": "example@example.invalid",
+  "date_of_birth": "1990-01-15",
+  "gender": "OTHER",
+  "nid_number": "DEMO-NID-001",
+  "passport_number": "",
+  "present_address": "Example address",
+  "permanent_address": "",
+  "district": "Example District",
+  "home_branch": 1,
+  "nominee_name": "",
+  "nominee_relationship": "",
+  "nominee_phone": ""
+}
+```
+
+`customer_type` may be `INDIVIDUAL` or `ORGANIZATION`; gender may be `MALE`, `FEMALE`, or `OTHER`. An individual must provide a unique NID or passport number; an organization may omit both. The branch must exist and be active. Optional identity strings that are empty are normalized to null. The API returns `201 Created` with only a safe confirmation:
+
+```json
+{
+  "success": true,
+  "customer": {
+    "id": 42,
+    "cif_number": "CIF00000042",
+    "full_name": "Example Individual",
+    "home_branch": "Example Branch",
+    "kyc_status": "PENDING"
+  }
+}
+```
+
+Validation failures return `400` with `success: false`, a safe message, and optional field-keyed generic errors. Duplicate-record conflicts return `409`; oversized bodies return `413`; audit-write failures return a generic `500`. Error responses and audit descriptions do not include submitted identity-document values.
+
+The branch-options endpoint uses the same Admin authorization policy and returns only active branches, ordered by branch code:
+
+```json
+{
+  "success": true,
+  "branches": [
+    {
+      "id": 1,
+      "branch_code": "BR001",
+      "branch_name": "Example Branch"
+    }
+  ]
+}
+```
 
 ## Local setup on Windows
 

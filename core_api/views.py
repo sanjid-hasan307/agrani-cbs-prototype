@@ -1,6 +1,8 @@
 import json
+from datetime import date
 
 from django.contrib.auth import authenticate, login as django_login
+from django.db import DatabaseError, IntegrityError, transaction
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
@@ -14,7 +16,11 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.http import HttpResponseForbidden
 from django.views.decorators.http import require_GET
 from django.core.paginator import Paginator
-from django.core.exceptions import ValidationError
+from django.core.exceptions import RequestDataTooBig, ValidationError
+from django.db.models import Q
+from audit.models import AuditLog
+from branches.models import Branch
+from customers.models import Customer
 from transactions.models import Transaction
 from transactions.services.authorization_service import (
     approve_transaction,
@@ -111,17 +117,16 @@ def manager_session_api(request):
     })
 
 
-@require_GET
-def admin_session_api(request):
-    if not request.user.is_authenticated or not request.user.is_active:
+def _admin_authorization_error(user):
+    if not user.is_authenticated or not user.is_active:
         return JsonResponse(
             {"success": False, "message": "Authentication required"},
             status=401
         )
 
     if (
-        not request.user.groups.filter(name="Admin").exists()
-        or request.user.groups.filter(
+        not user.groups.filter(name="Admin").exists()
+        or user.groups.filter(
             name__in=("Manager", "Teller", "Officer", "Auditor")
         ).exists()
     ):
@@ -130,10 +135,363 @@ def admin_session_api(request):
             status=403
         )
 
+    return None
+
+
+class _AuditLogWriteFailed(Exception):
+    pass
+
+
+_CUSTOMER_REGISTRATION_FIELDS = {
+    "customer_type",
+    "full_name",
+    "phone",
+    "email",
+    "date_of_birth",
+    "gender",
+    "nid_number",
+    "passport_number",
+    "present_address",
+    "permanent_address",
+    "district",
+    "home_branch",
+    "nominee_name",
+    "nominee_relationship",
+    "nominee_phone",
+}
+_CUSTOMER_OPTIONAL_FIELDS = {
+    "email",
+    "date_of_birth",
+    "gender",
+    "nid_number",
+    "passport_number",
+    "permanent_address",
+    "nominee_name",
+    "nominee_relationship",
+    "nominee_phone",
+}
+_CUSTOMER_FIELD_MAX_LENGTHS = {
+    "customer_type": 20,
+    "full_name": 150,
+    "phone": 20,
+    "email": 254,
+    "gender": 10,
+    "nid_number": 30,
+    "passport_number": 30,
+    "present_address": 5000,
+    "permanent_address": 5000,
+    "district": 100,
+    "nominee_name": 150,
+    "nominee_relationship": 50,
+    "nominee_phone": 20,
+}
+_CUSTOMER_REQUIRED_FIELDS = {
+    "full_name",
+    "phone",
+    "present_address",
+    "district",
+    "home_branch",
+}
+_MAX_CUSTOMER_REQUEST_BYTES = 16_384
+
+
+def _customer_registration_error(message, *, errors=None, status_code=400):
+    response = {"success": False, "message": message}
+    if errors:
+        response["errors"] = errors
+    return JsonResponse(response, status=status_code)
+
+
+def _parse_customer_registration(request):
+    if request.content_type != "application/json":
+        return None, _customer_registration_error(
+            "Content-Type must be application/json."
+        )
+
+    content_length = request.META.get("CONTENT_LENGTH")
+    if content_length:
+        try:
+            if int(content_length) > _MAX_CUSTOMER_REQUEST_BYTES:
+                return None, _customer_registration_error(
+                    "Request body is too large.",
+                    status_code=413,
+                )
+        except ValueError:
+            return None, _customer_registration_error(
+                "Invalid Content-Length header."
+            )
+
+    try:
+        body = request.body
+    except RequestDataTooBig:
+        return None, _customer_registration_error(
+            "Request body is too large.",
+            status_code=413,
+        )
+
+    if len(body) > _MAX_CUSTOMER_REQUEST_BYTES:
+        return None, _customer_registration_error(
+            "Request body is too large.",
+            status_code=413,
+        )
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, _customer_registration_error(
+            "Request body must be valid JSON."
+        )
+
+    if not isinstance(payload, dict):
+        return None, _customer_registration_error(
+            "Request body must be a JSON object."
+        )
+
+    if payload.keys() - _CUSTOMER_REGISTRATION_FIELDS:
+        return None, _customer_registration_error(
+            "Request contains unsupported registration fields."
+        )
+
+    missing_fields = _CUSTOMER_REQUIRED_FIELDS - payload.keys()
+    if missing_fields:
+        return None, _customer_registration_error(
+            "Required customer fields are missing.",
+            errors={field: ["This field is required."] for field in sorted(missing_fields)},
+        )
+
+    normalized = {}
+    for field, value in payload.items():
+        if field == "home_branch":
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                return None, _customer_registration_error(
+                    "Invalid registration field.",
+                    errors={field: ["Enter a valid branch ID."]},
+                )
+            normalized[field] = value
+            continue
+
+        if field == "date_of_birth":
+            if value is None and field in _CUSTOMER_OPTIONAL_FIELDS:
+                normalized[field] = None
+                continue
+            if not isinstance(value, str):
+                return None, _customer_registration_error(
+                    "Invalid registration field.",
+                    errors={field: ["Enter a date in YYYY-MM-DD format."]},
+                )
+            try:
+                parsed_date = date.fromisoformat(value)
+            except ValueError:
+                return None, _customer_registration_error(
+                    "Invalid registration field.",
+                    errors={field: ["Enter a valid date in YYYY-MM-DD format."]},
+                )
+            if parsed_date.isoformat() != value:
+                return None, _customer_registration_error(
+                    "Invalid registration field.",
+                    errors={field: ["Enter a date in YYYY-MM-DD format."]},
+                )
+            normalized[field] = parsed_date
+            continue
+
+        if value is None and field in _CUSTOMER_OPTIONAL_FIELDS:
+            normalized[field] = None
+            continue
+        if not isinstance(value, str):
+            return None, _customer_registration_error(
+                "Invalid registration field.",
+                errors={field: ["Enter a valid text value."]},
+            )
+
+        if len(value) > _CUSTOMER_FIELD_MAX_LENGTHS[field]:
+            return None, _customer_registration_error(
+                "Invalid registration field.",
+                errors={field: ["Value exceeds the maximum allowed length."]},
+            )
+        if field in {"nid_number", "passport_number"} and not value.strip():
+            value = None
+        normalized[field] = value
+
+    return normalized, None
+
+
+@require_GET
+def admin_session_api(request):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
     return JsonResponse({
         "success": True,
         "username": request.user.username,
         "role": "Admin"
+    })
+
+
+@csrf_protect
+def admin_customers_api(request):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    if request.method == "POST":
+        payload, error_response = _parse_customer_registration(request)
+        if error_response:
+            return error_response
+
+        branch = Branch.objects.filter(
+            pk=payload.pop("home_branch"),
+            is_active=True,
+        ).only("id", "branch_name").first()
+        if branch is None:
+            return _customer_registration_error(
+                "Select an existing active branch.",
+                errors={"home_branch": ["Select an existing active branch."]},
+            )
+
+        customer = Customer(
+            **payload,
+            home_branch=branch,
+            created_by=request.user,
+        )
+        try:
+            with transaction.atomic():
+                customer.save()
+                try:
+                    AuditLog.objects.create(
+                        user=request.user,
+                        action="CREATE_CUSTOMER",
+                        model_name="Customer",
+                        object_id=str(customer.pk),
+                        description="Customer registered through the Admin API.",
+                        ip_address=request.META.get("REMOTE_ADDR"),
+                    )
+                except DatabaseError as error:
+                    raise _AuditLogWriteFailed from error
+        except ValidationError as error:
+            validation_fields = getattr(error, "message_dict", {})
+            safe_errors = {
+                field: ["Invalid or conflicting value."]
+                for field in validation_fields
+            }
+            return _customer_registration_error(
+                "Customer registration data is invalid.",
+                errors=safe_errors,
+            )
+        except IntegrityError:
+            return _customer_registration_error(
+                "Customer registration conflicts with an existing record.",
+                status_code=409,
+            )
+        except _AuditLogWriteFailed:
+            return _customer_registration_error(
+                "Customer registration could not be completed.",
+                status_code=500,
+            )
+
+        return JsonResponse(
+            {
+                "success": True,
+                "customer": {
+                    "id": customer.pk,
+                    "cif_number": customer.cif_number,
+                    "full_name": customer.full_name,
+                    "home_branch": branch.branch_name,
+                    "kyc_status": customer.kyc_status,
+                },
+            },
+            status=201,
+        )
+
+    if request.method != "GET":
+        return JsonResponse(
+            {"success": False, "message": "GET or POST method required."},
+            status=405,
+        )
+
+    search = request.GET.get("search", "")
+    if len(search) > 100:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Search query must be 100 characters or fewer.",
+            },
+            status=400
+        )
+
+    customers = Customer.objects.all()
+    search = search.strip()
+    if search:
+        customers = customers.filter(
+            Q(full_name__icontains=search)
+            | Q(cif_number__icontains=search)
+            | Q(district__icontains=search)
+            | Q(home_branch__branch_name__icontains=search)
+        )
+
+    customers = customers.select_related("home_branch").only(
+        "id",
+        "full_name",
+        "customer_type",
+        "kyc_status",
+        "status",
+        "created_at",
+        "home_branch__branch_name",
+    ).order_by("-created_at", "-id")
+    paginator = Paginator(customers, 10)
+    page_number = request.GET.get("page")
+    try:
+        if page_number is not None:
+            page_number = max(1, int(page_number))
+    except ValueError:
+        pass
+    page_obj = paginator.get_page(page_number)
+
+    return JsonResponse({
+        "success": True,
+        "pagination": {
+            "page": page_obj.number,
+            "page_size": paginator.per_page,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        },
+        "customers": [
+            {
+                "id": customer.pk,
+                "full_name": customer.full_name,
+                "customer_type": customer.customer_type,
+                "kyc_status": customer.kyc_status,
+                "status": customer.status,
+                "home_branch": customer.home_branch.branch_name,
+                "created_at": customer.created_at.isoformat(),
+            }
+            for customer in page_obj.object_list
+        ],
+    })
+
+
+@require_GET
+def admin_branch_options_api(request):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    branches = Branch.objects.filter(is_active=True).order_by(
+        "branch_code",
+        "id",
+    ).only("id", "branch_code", "branch_name")
+    return JsonResponse({
+        "success": True,
+        "branches": [
+            {
+                "id": branch.pk,
+                "branch_code": branch.branch_code,
+                "branch_name": branch.branch_name,
+            }
+            for branch in branches
+        ],
     })
 
 

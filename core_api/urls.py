@@ -5,6 +5,8 @@ from .views import (
     csrf_api,
     manager_session_api,
     admin_session_api,
+    admin_customers_api,
+    admin_branch_options_api,
     teller_session_api,
     teller_transactions_api,
     manager_pending_transactions_api,
@@ -34,6 +36,16 @@ urlpatterns = [
         'admin/session/',
         admin_session_api,
         name='admin_session_api'
+    ),
+    path(
+        'admin/branches/options/',
+        admin_branch_options_api,
+        name='admin_branch_options_api'
+    ),
+    path(
+        'admin/customers/',
+        admin_customers_api,
+        name='admin_customers_api'
     ),
     path(
         'teller/session/',

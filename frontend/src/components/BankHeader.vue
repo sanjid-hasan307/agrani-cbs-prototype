@@ -11,6 +11,7 @@ const loggingOut = ref(false)
 const logoutError = ref('')
 
 const dashboardTitle = computed(() => {
+  if (route.path === '/dashboard/admin/customers') return 'Customer Management'
   if (route.path === '/dashboard/admin') return 'Admin Dashboard'
   if (route.path === '/dashboard/manager') return 'Manager Dashboard'
   if (route.path === '/dashboard/teller') return 'Teller Dashboard'

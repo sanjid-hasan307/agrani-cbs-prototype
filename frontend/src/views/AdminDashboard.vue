@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import api from '../services/api'
 import { useAuthStore } from '../stores/auth'
 
@@ -88,12 +88,12 @@ onMounted(verifyAdminSession)
       </section>
 
       <section class="management-section" aria-label="Administration areas">
-        <article class="management-card">
+        <RouterLink class="management-card management-card-link" to="/dashboard/admin/customers">
           <span class="card-icon" aria-hidden="true">01</span>
           <h2>Customer Management</h2>
           <p>Customer records and profile administration.</p>
-          <span class="coming-soon">Coming Soon</span>
-        </article>
+          <span class="open-section">View customer list</span>
+        </RouterLink>
 
         <article class="management-card">
           <span class="card-icon" aria-hidden="true">02</span>
@@ -120,7 +120,7 @@ onMounted(verifyAdminSession)
           <span class="card-icon" aria-hidden="true">05</span>
           <h2>Audit Monitoring</h2>
           <p>Audit record review and monitoring.</p>
-          <span class="coming-soon">Not Yet Implemented</span>
+          <span class="coming-soon">Coming Soon</span>
         </article>
       </section>
     </div>
@@ -230,6 +230,29 @@ onMounted(verifyAdminSession)
   flex-direction: column;
   align-items: flex-start;
   padding: 18px;
+}
+
+.management-card-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.management-card-link:hover,
+.management-card-link:focus-visible {
+  border-color: #9bbce0;
+  box-shadow: 0 7px 20px rgb(26 72 120 / 12%);
+}
+
+.management-card-link:focus-visible {
+  outline: 3px solid rgb(13 110 253 / 25%);
+  outline-offset: 2px;
+}
+
+.management-card-link .open-section {
+  margin-top: auto;
+  color: #245b8f;
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .card-icon {
