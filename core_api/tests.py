@@ -100,6 +100,87 @@ class ManagerApiTestCase(TestCase):
         return transaction
 
 
+class AdminSessionApiTests(TestCase):
+    endpoint = "/api/admin/session/"
+
+    def setUp(self):
+        self.admin_group, _ = Group.objects.get_or_create(name="Admin")
+        self.admin = User.objects.create_user(username="api_admin")
+        self.admin.groups.add(self.admin_group)
+
+    def test_anonymous_user_is_denied(self):
+        response = self.client.get(self.endpoint)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(response.json()["success"])
+
+    def test_inactive_user_is_denied(self):
+        self.admin.is_active = False
+        self.admin.save(update_fields=["is_active"])
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.endpoint)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(response.json()["success"])
+
+    def test_manager_is_denied(self):
+        manager = User.objects.create_user(username="api_manager")
+        manager.groups.add(Group.objects.get(name="Manager"))
+        self.client.force_login(manager)
+
+        response = self.client.get(self.endpoint)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["success"])
+
+    def test_teller_is_denied(self):
+        teller = User.objects.create_user(username="api_teller")
+        teller_group, _ = Group.objects.get_or_create(name="Teller")
+        teller.groups.add(teller_group)
+        self.client.force_login(teller)
+
+        response = self.client.get(self.endpoint)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["success"])
+
+    def test_active_admin_group_member_is_allowed(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.endpoint)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "success": True,
+            "username": "api_admin",
+            "role": "Admin",
+        })
+
+    def test_ungrouped_superuser_is_denied(self):
+        superuser = User.objects.create_superuser(
+            username="api_superuser",
+            email="superuser@example.com",
+            password="local-test-password",
+        )
+        self.client.force_login(superuser)
+
+        response = self.client.get(self.endpoint)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["success"])
+
+    def test_admin_with_manager_membership_is_denied(self):
+        manager_group, _ = Group.objects.get_or_create(name="Manager")
+        self.admin.groups.add(manager_group)
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.endpoint)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.json()["success"])
+
+
 class ManagerPendingTransactionsApiTests(ManagerApiTestCase):
     def test_authenticated_manager_receives_pending_transactions(self):
         transaction = self._create_transaction(self.account_a)

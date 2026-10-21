@@ -4,6 +4,7 @@ from .views import (
     login_api,
     csrf_api,
     manager_session_api,
+    admin_session_api,
     teller_session_api,
     teller_transactions_api,
     manager_pending_transactions_api,
@@ -28,6 +29,11 @@ urlpatterns = [
         'manager/session/',
         manager_session_api,
         name='manager_session_api'
+    ),
+    path(
+        'admin/session/',
+        admin_session_api,
+        name='admin_session_api'
     ),
     path(
         'teller/session/',

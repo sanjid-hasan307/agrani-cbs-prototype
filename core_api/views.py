@@ -112,6 +112,32 @@ def manager_session_api(request):
 
 
 @require_GET
+def admin_session_api(request):
+    if not request.user.is_authenticated or not request.user.is_active:
+        return JsonResponse(
+            {"success": False, "message": "Authentication required"},
+            status=401
+        )
+
+    if (
+        not request.user.groups.filter(name="Admin").exists()
+        or request.user.groups.filter(
+            name__in=("Manager", "Teller", "Officer", "Auditor")
+        ).exists()
+    ):
+        return JsonResponse(
+            {"success": False, "message": "Admin access required"},
+            status=403
+        )
+
+    return JsonResponse({
+        "success": True,
+        "username": request.user.username,
+        "role": "Admin"
+    })
+
+
+@require_GET
 def teller_session_api(request):
     if not request.user.is_authenticated:
         return JsonResponse(

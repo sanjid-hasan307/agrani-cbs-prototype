@@ -93,6 +93,30 @@ async function login() {
         authStore.setUser(response.data)
         await router.replace('/dashboard/teller')
         emit('close')
+      } else if (response.data.role === 'Admin') {
+        try {
+          const sessionResponse = await api.get('/admin/session/')
+          const session = sessionResponse.data
+          if (
+            !session.success
+            || session.role !== 'Admin'
+            || session.username !== response.data.username
+          ) {
+            authStore.logout()
+            error.value = 'Your Admin session could not be verified. Please contact an administrator.'
+            return
+          }
+
+          authStore.setUser(session)
+          await router.replace('/dashboard/admin')
+          emit('close')
+        } catch (sessionError) {
+          authStore.logout()
+          error.value = sessionError.response?.status === 401
+            || sessionError.response?.status === 403
+            ? 'Your account is not authorized for the Admin dashboard.'
+            : 'Unable to verify your Admin session. Please try again.'
+        }
       } else {
         authStore.logout()
         error.value = 'Your account does not have a supported dashboard role. Please contact an administrator.'
