@@ -502,6 +502,380 @@ _ACCOUNT_OPENING_FIELDS = {"customer", "product", "branch"}
 _MAX_ACCOUNT_REQUEST_BYTES = 1024
 
 
+_BRANCH_CREATE_FIELDS = {
+    "branch_code",
+    "branch_name",
+    "routing_number",
+    "address",
+    "district",
+    "phone",
+    "email",
+}
+_BRANCH_UPDATE_FIELDS = {
+    "branch_name",
+    "address",
+    "district",
+    "phone",
+    "email",
+    "is_active",
+}
+_BRANCH_REQUIRED_FIELDS = {
+    "branch_code",
+    "branch_name",
+    "address",
+    "district",
+}
+_BRANCH_MAX_LENGTHS = {
+    "branch_code": 20,
+    "branch_name": 150,
+    "routing_number": 20,
+    "district": 100,
+    "phone": 20,
+    "email": 254,
+}
+_MAX_BRANCH_REQUEST_BYTES = 16_384
+
+
+class _BranchAuditWriteFailed(Exception):
+    pass
+
+
+def _branch_api_error(message, *, errors=None, status_code=400):
+    response = {"success": False, "message": message}
+    if errors:
+        response["errors"] = errors
+    return JsonResponse(response, status=status_code)
+
+
+def _parse_branch_payload(request, *, create):
+    if request.content_type != "application/json":
+        return None, _branch_api_error(
+            "Content-Type must be application/json."
+        )
+
+    content_length = request.META.get("CONTENT_LENGTH")
+    if content_length:
+        try:
+            if int(content_length) > _MAX_BRANCH_REQUEST_BYTES:
+                return None, _branch_api_error(
+                    "Request body is too large.",
+                    status_code=413,
+                )
+        except ValueError:
+            return None, _branch_api_error("Invalid Content-Length header.")
+
+    try:
+        body = request.body
+    except RequestDataTooBig:
+        return None, _branch_api_error(
+            "Request body is too large.",
+            status_code=413,
+        )
+    if len(body) > _MAX_BRANCH_REQUEST_BYTES:
+        return None, _branch_api_error(
+            "Request body is too large.",
+            status_code=413,
+        )
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, _branch_api_error("Request body must be valid JSON.")
+    if not isinstance(payload, dict):
+        return None, _branch_api_error(
+            "Request body must be a JSON object."
+        )
+    if not payload:
+        return None, _branch_api_error("Request body must not be empty.")
+
+    allowed_fields = _BRANCH_CREATE_FIELDS if create else _BRANCH_UPDATE_FIELDS
+    unsupported_fields = payload.keys() - allowed_fields
+    if unsupported_fields:
+        immutable_fields = unsupported_fields & {"branch_code", "routing_number"}
+        if not create and immutable_fields:
+            return None, _branch_api_error(
+                "Branch code and routing number cannot be changed."
+            )
+        return None, _branch_api_error(
+            "Request contains unsupported branch fields."
+        )
+
+    if create:
+        missing_fields = _BRANCH_REQUIRED_FIELDS - payload.keys()
+        if missing_fields:
+            return None, _branch_api_error(
+                "Required branch fields are missing.",
+                errors={
+                    field: ["This field is required."]
+                    for field in sorted(missing_fields)
+                },
+            )
+
+    normalized = {}
+    optional_fields = {"routing_number", "phone", "email"}
+    for field, value in payload.items():
+        if field == "is_active":
+            if not isinstance(value, bool):
+                return None, _branch_api_error(
+                    "is_active must be a boolean.",
+                    errors={field: ["Enter true or false."]},
+                )
+            normalized[field] = value
+            continue
+
+        if value is None and field in optional_fields:
+            normalized[field] = None
+            continue
+        if not isinstance(value, str):
+            return None, _branch_api_error(
+                "Branch fields must be text values.",
+                errors={field: ["Enter a valid text value."]},
+            )
+
+        if field in optional_fields and not value.strip():
+            normalized[field] = None
+            continue
+        if field in {"branch_code", "branch_name", "address", "district"}:
+            value = value.strip()
+            if not value:
+                return None, _branch_api_error(
+                    "Required branch fields cannot be blank.",
+                    errors={field: ["This field is required."]},
+                )
+        max_length = _BRANCH_MAX_LENGTHS.get(field)
+        if max_length is not None and len(value) > max_length:
+            return None, _branch_api_error(
+                "Branch field exceeds the maximum allowed length.",
+                errors={field: ["Value exceeds the maximum allowed length."]},
+            )
+        normalized[field] = value
+
+    return normalized, None
+
+
+def _branch_response(branch):
+    return {
+        "id": branch.pk,
+        "branch_code": branch.branch_code,
+        "branch_name": branch.branch_name,
+        "district": branch.district,
+        "address": branch.address,
+        "phone": branch.phone,
+        "email": branch.email,
+        "is_active": branch.is_active,
+        "created_at": branch.created_at.isoformat(),
+        "updated_at": branch.updated_at.isoformat(),
+    }
+
+
+def _branch_validation_response(error):
+    validation_fields = getattr(error, "message_dict", {})
+    unique_fields = {"branch_code", "routing_number"}
+    if unique_fields.intersection(validation_fields):
+        return _branch_api_error(
+            "Branch code or routing number already exists.",
+            status_code=409,
+        )
+    safe_errors = {
+        field: ["Invalid value."]
+        for field in validation_fields
+    }
+    return _branch_api_error(
+        "Branch data is invalid.",
+        errors=safe_errors,
+    )
+
+
+@json_csrf_protect
+def admin_branches_api(request):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    if request.method == "POST":
+        payload, error_response = _parse_branch_payload(request, create=True)
+        if error_response:
+            return error_response
+
+        branch = Branch(**payload)
+        try:
+            with transaction.atomic():
+                branch.full_clean()
+                branch.save()
+                try:
+                    AuditLog.objects.create(
+                        user=request.user,
+                        action="CREATE_BRANCH",
+                        model_name="Branch",
+                        object_id=str(branch.pk),
+                        description=f"Branch {branch.branch_code} created.",
+                        ip_address=request.META.get("REMOTE_ADDR"),
+                    )
+                except DatabaseError as error:
+                    raise _BranchAuditWriteFailed from error
+        except ValidationError as error:
+            return _branch_validation_response(error)
+        except IntegrityError:
+            return _branch_api_error(
+                "Branch code or routing number already exists.",
+                status_code=409,
+            )
+        except _BranchAuditWriteFailed:
+            return _branch_api_error(
+                "Branch could not be created.",
+                status_code=500,
+            )
+
+        return JsonResponse(
+            {"success": True, "branch": _branch_response(branch)},
+            status=201,
+        )
+
+    if request.method != "GET":
+        return _branch_api_error(
+            "GET or POST method required.",
+            status_code=405,
+        )
+
+    page_value = request.GET.get("page", "1")
+    try:
+        page_number = int(page_value)
+        if page_number < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return _branch_api_error("Page must be a positive integer.")
+
+    status_filter = request.GET.get("status", "active").lower()
+    if status_filter not in {"active", "inactive", "all"}:
+        return _branch_api_error(
+            "Status must be active, inactive, or all."
+        )
+
+    branches = Branch.objects.all()
+    if status_filter == "active":
+        branches = branches.filter(is_active=True)
+    elif status_filter == "inactive":
+        branches = branches.filter(is_active=False)
+    branches = branches.only(
+        "id",
+        "branch_code",
+        "branch_name",
+        "district",
+        "address",
+        "phone",
+        "email",
+        "is_active",
+        "created_at",
+        "updated_at",
+    ).order_by("branch_code", "id")
+    paginator = Paginator(branches, 10)
+    page_obj = paginator.get_page(page_number)
+    return JsonResponse({
+        "success": True,
+        "pagination": {
+            "page": page_obj.number,
+            "page_size": paginator.per_page,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        },
+        "branches": [
+            _branch_response(branch)
+            for branch in page_obj.object_list
+        ],
+    })
+
+
+@json_csrf_protect
+def admin_branch_detail_api(request, branch_id):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    if request.method == "GET":
+        branch = Branch.objects.filter(pk=branch_id).first()
+        if branch is None:
+            return _branch_api_error(
+                "Branch not found.",
+                status_code=404,
+            )
+        return JsonResponse({
+            "success": True,
+            "branch": _branch_response(branch),
+        })
+
+    if request.method != "PATCH":
+        return _branch_api_error(
+            "GET or PATCH method required.",
+            status_code=405,
+        )
+
+    payload, error_response = _parse_branch_payload(request, create=False)
+    if error_response:
+        return error_response
+
+    try:
+        with transaction.atomic():
+            branch = Branch.objects.select_for_update().filter(
+                pk=branch_id
+            ).first()
+            if branch is None:
+                return _branch_api_error(
+                    "Branch not found.",
+                    status_code=404,
+                )
+
+            was_active = branch.is_active
+            for field, value in payload.items():
+                setattr(branch, field, value)
+            branch.full_clean()
+            branch.save()
+
+            if was_active and not branch.is_active:
+                action = "DEACTIVATE_BRANCH"
+                description = f"Branch {branch.branch_code} deactivated."
+            elif not was_active and branch.is_active:
+                action = "UPDATE_BRANCH"
+                description = f"Branch {branch.branch_code} reactivated."
+            else:
+                action = "UPDATE_BRANCH"
+                changed_fields = ", ".join(sorted(payload))
+                description = (
+                    f"Branch {branch.branch_code} updated "
+                    f"(fields: {changed_fields})."
+                )
+
+            try:
+                AuditLog.objects.create(
+                    user=request.user,
+                    action=action,
+                    model_name="Branch",
+                    object_id=str(branch.pk),
+                    description=description,
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                )
+            except DatabaseError as error:
+                raise _BranchAuditWriteFailed from error
+    except ValidationError as error:
+        return _branch_validation_response(error)
+    except IntegrityError:
+        return _branch_api_error(
+            "Branch update conflicts with an existing record.",
+            status_code=409,
+        )
+    except _BranchAuditWriteFailed:
+        return _branch_api_error(
+            "Branch update could not be completed.",
+            status_code=500,
+        )
+
+    return JsonResponse({
+        "success": True,
+        "branch": _branch_response(branch),
+    })
+
+
 def _account_api_error(message, *, status_code=400):
     return JsonResponse(
         {"success": False, "message": message},

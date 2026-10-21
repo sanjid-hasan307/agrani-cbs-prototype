@@ -46,6 +46,10 @@ The Vue client uses the following Django API routes:
 | `GET` | `/api/admin/session/` | Check the signed-in Admin session |
 | `GET` | `/api/admin/customers/` | Get a paginated, searchable customer list |
 | `POST` | `/api/admin/customers/` | Register a customer |
+| `GET` | `/api/admin/branches/` | Get a paginated branch list |
+| `GET` | `/api/admin/branches/<id>/` | Get branch details |
+| `POST` | `/api/admin/branches/` | Create a branch |
+| `PATCH` | `/api/admin/branches/<id>/` | Update or activate/deactivate a branch |
 | `GET` | `/api/admin/branches/options/` | Get active branches for Admin forms |
 | `GET` | `/api/admin/accounts/` | Get a paginated account list |
 | `POST` | `/api/admin/accounts/` | Open an account with zero balances |
@@ -143,6 +147,26 @@ The branch-options endpoint uses the same Admin authorization policy and returns
   ]
 }
 ```
+
+Branch Management endpoints require an active session user directly in the Admin group with no conflicting banking-role membership. POST and PATCH also require a valid CSRF token. `GET /api/admin/branches/` accepts a positive `page` and a `status` filter of `active` (default), `inactive`, or `all`; results are stably ordered by branch code and ID, with 10 branches per page. Lists and details return operational branch fields (`id`, `branch_code`, `branch_name`, `district`, `address`, `phone`, `email`, `is_active`, `created_at`, and `updated_at`), but do not expose routing numbers.
+
+Create a branch with the required code, name, address, and district. Routing number, phone, and email are optional. New branches are active by default.
+
+```json
+{
+  "branch_code": "DEMO001",
+  "branch_name": "Example Branch",
+  "routing_number": "DEMO-ROUTE-001",
+  "address": "Example branch address",
+  "district": "Example District",
+  "phone": "",
+  "email": ""
+}
+```
+
+The `201 Created` response is `{ "success": true, "branch": { ... } }` using the operational fields listed above. PATCH accepts only `branch_name`, `address`, `district`, `phone`, `email`, and boolean `is_active`. Branch code and routing number are immutable through the update API. Deactivation records an audit action and does not reassign or delete customers, accounts, staff, or transactions. No deletion endpoint is provided. The existing `/api/admin/branches/options/` contract remains unchanged and returns only active branches with ID, branch code, and branch name.
+
+Invalid input returns JSON `400`, duplicate branch code or routing number returns `409`, missing details return `404`, and audit-write failures return a generic `500`. Note: Django Admin branch deletion permissions are unchanged in this API step; a separate follow-up should restrict Django Admin deletion in favor of deactivation.
 
 Admin account APIs require an active session user directly in the Admin group with no conflicting banking-role membership. Account opening also requires a valid CSRF token. `GET /api/admin/accounts/` accepts a positive `page` parameter and returns up to 10 accounts with internal ID, account number, customer display name/CIF, product code/name, branch code/name, currency, status, and opening date. Customer identity-document and contact details are not included.
 

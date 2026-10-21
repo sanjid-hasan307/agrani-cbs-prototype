@@ -1715,4 +1715,483 @@ class ManagerTransactionActionApiTests(ManagerApiTestCase):
         )
 
 
-# Create your tests here.
+class AdminBranchManagementApiTests(TestCase):
+    collection_url = "/api/admin/branches/"
+    detail_url = "/api/admin/branches/{}/"
+    options_url = "/api/admin/branches/options/"
+
+    def setUp(self):
+        self.admin_group, _ = Group.objects.get_or_create(name="Admin")
+        self.admin = User.objects.create_user(username="branch_management_admin")
+        self.admin.groups.add(self.admin_group)
+        self.branch = self._create_branch()
+        self.valid_payload = {
+            "branch_code": "NEW001",
+            "branch_name": "New Branch",
+            "address": "New branch address",
+            "district": "Dhaka",
+        }
+
+    def _create_branch(self, **overrides):
+        values = {
+            "branch_code": "BM001",
+            "branch_name": "Branch Management Branch",
+            "address": "Management branch address",
+            "district": "Dhaka",
+        }
+        values.update(overrides)
+        return Branch.objects.create(**values)
+
+    def _post(self, payload=None, *, url=None, raw_body=None, client=None):
+        client = client or self.client
+        body = json.dumps(payload) if raw_body is None else raw_body
+        return client.post(
+            url or self.collection_url,
+            data=body,
+            content_type="application/json",
+        )
+
+    def _patch(self, branch_id, payload=None, *, raw_body=None, client=None):
+        client = client or self.client
+        body = json.dumps(payload) if raw_body is None else raw_body
+        return client.patch(
+            self.detail_url.format(branch_id),
+            data=body,
+            content_type="application/json",
+        )
+
+    def test_branch_list_and_detail_return_operational_fields(self):
+        self.client.force_login(self.admin)
+
+        list_response = self.client.get(self.collection_url, {"status": "all"})
+        detail_response = self.client.get(
+            self.detail_url.format(self.branch.pk)
+        )
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(list_response.json()["branches"], [
+            detail_response.json()["branch"]
+        ])
+        branch_data = detail_response.json()["branch"]
+        self.assertEqual(branch_data["id"], self.branch.pk)
+        self.assertEqual(branch_data["branch_code"], self.branch.branch_code)
+        self.assertEqual(branch_data["address"], self.branch.address)
+        self.assertTrue(branch_data["is_active"])
+        self.assertIn("created_at", branch_data)
+        self.assertIn("updated_at", branch_data)
+        self.assertNotIn("routing_number", branch_data)
+
+    def test_list_supports_status_filter_pagination_and_stable_ordering(self):
+        self._create_branch(
+            branch_code="BM002",
+            branch_name="Inactive Branch",
+            is_active=False,
+        )
+        self._create_branch(
+            branch_code="BM003",
+            branch_name="Third Branch",
+        )
+        for index in range(10):
+            self._create_branch(
+                branch_code=f"BM{index + 10:03d}",
+                branch_name=f"Paged Branch {index}",
+            )
+        self.client.force_login(self.admin)
+
+        active = self.client.get(self.collection_url, {"status": "active"})
+        inactive = self.client.get(self.collection_url, {"status": "inactive"})
+        page_one = self.client.get(
+            self.collection_url,
+            {"status": "all", "page": 1},
+        )
+        page_two = self.client.get(
+            self.collection_url,
+            {"status": "all", "page": 2},
+        )
+
+        self.assertTrue(all(row["is_active"] for row in active.json()["branches"]))
+        self.assertEqual(
+            [row["branch_code"] for row in inactive.json()["branches"]],
+            ["BM002"],
+        )
+        self.assertEqual(page_one.json()["pagination"]["page_size"], 10)
+        self.assertEqual(len(page_one.json()["branches"]), 10)
+        self.assertEqual(len(page_two.json()["branches"]), 3)
+        self.assertEqual(
+            [row["branch_code"] for row in page_one.json()["branches"]]
+            + [row["branch_code"] for row in page_two.json()["branches"]],
+            sorted(
+                row["branch_code"]
+                for row in page_one.json()["branches"] + page_two.json()["branches"]
+            ),
+        )
+
+    def test_invalid_list_filters_and_pagination_return_json_errors(self):
+        self.client.force_login(self.admin)
+
+        for params in (
+            {"page": "0"},
+            {"page": "not-a-page"},
+            {"status": "enabled"},
+        ):
+            with self.subTest(params=params):
+                response = self.client.get(self.collection_url, params)
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(response.json()["success"])
+
+    def test_detail_returns_404_for_missing_branch(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.detail_url.format(999999))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["success"], False)
+
+    def test_create_branch_validates_and_records_audit_actor(self):
+        self.client.force_login(self.admin)
+        payload = {
+            **self.valid_payload,
+            "routing_number": "RT-NEW-01",
+            "phone": "01711111111",
+            "email": "branch@example.invalid",
+        }
+
+        response = self._post(payload)
+
+        self.assertEqual(response.status_code, 201)
+        branch = Branch.objects.get(branch_code="NEW001")
+        self.assertEqual(branch.routing_number, "RT-NEW-01")
+        self.assertIsNone(response.json()["branch"].get("routing_number"))
+        audit = AuditLog.objects.get(
+            action="CREATE_BRANCH",
+            model_name="Branch",
+            object_id=str(branch.pk),
+        )
+        self.assertEqual(audit.user, self.admin)
+        self.assertNotIn("branch@example.invalid", audit.description)
+        self.assertNotIn("New branch address", audit.description)
+
+    def test_creation_normalizes_blank_optional_fields_and_rejects_invalid_payloads(self):
+        self.client.force_login(self.admin)
+        cases = (
+            ("malformed_json", None, "{"),
+            ("non_object", None, "[]"),
+            ("missing_required", {"branch_code": "NEW001"}, None),
+            ("wrong_type", {**self.valid_payload, "branch_name": 12}, None),
+            ("invalid_email", {
+                **self.valid_payload,
+                "email": "not-an-email",
+            }, None),
+            ("unknown_field", {**self.valid_payload, "created_at": "now"}, None),
+            ("client_id", {**self.valid_payload, "id": 22}, None),
+            ("client_timestamp", {
+                **self.valid_payload,
+                "updated_at": "now",
+            }, None),
+        )
+        for label, payload, raw_body in cases:
+            with self.subTest(label=label):
+                response = self._post(payload, raw_body=raw_body)
+                self.assertEqual(response.status_code, 400)
+
+        valid = self._post({
+            **self.valid_payload,
+            "routing_number": "",
+            "phone": "",
+            "email": "",
+        })
+        self.assertEqual(valid.status_code, 201)
+        created = Branch.objects.get(branch_code="NEW001")
+        self.assertIsNone(created.routing_number)
+        self.assertIsNone(created.phone)
+        self.assertIsNone(created.email)
+
+    def test_creation_rejects_duplicate_branch_code_and_routing_number(self):
+        self._create_branch(
+            branch_code="DUP001",
+            routing_number="RT-DUP-01",
+        )
+        self.client.force_login(self.admin)
+
+        duplicate_code = self._post({
+            **self.valid_payload,
+            "branch_code": "DUP001",
+        })
+        duplicate_routing = self._post({
+            **self.valid_payload,
+            "branch_code": "NEW002",
+            "routing_number": "RT-DUP-01",
+        })
+
+        self.assertEqual(duplicate_code.status_code, 409)
+        self.assertEqual(duplicate_routing.status_code, 409)
+        self.assertNotIn("UNIQUE", duplicate_code.content.decode())
+
+    def test_integrity_error_race_returns_safe_conflict(self):
+        self.client.force_login(self.admin)
+
+        with patch.object(
+            Branch,
+            "save",
+            side_effect=IntegrityError("simulated unique race"),
+        ):
+            response = self._post(self.valid_payload)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn("simulated", response.content.decode())
+
+    def test_audit_failure_rolls_back_branch_creation_and_update(self):
+        self.client.force_login(self.admin)
+        initial_count = Branch.objects.count()
+
+        with patch.object(
+            AuditLog.objects,
+            "create",
+            side_effect=DatabaseError("simulated audit failure"),
+        ):
+            create_response = self._post(self.valid_payload)
+        self.assertEqual(create_response.status_code, 500)
+        self.assertEqual(Branch.objects.count(), initial_count)
+
+        with patch.object(
+            AuditLog.objects,
+            "create",
+            side_effect=DatabaseError("simulated audit failure"),
+        ):
+            update_response = self._patch(
+                self.branch.pk,
+                {"branch_name": "Changed Name"},
+            )
+        self.assertEqual(update_response.status_code, 500)
+        self.branch.refresh_from_db()
+        self.assertEqual(self.branch.branch_name, "Branch Management Branch")
+
+    def test_patch_updates_deactivates_and_reactivates_with_audit(self):
+        self.client.force_login(self.admin)
+
+        update_response = self._patch(
+            self.branch.pk,
+            {
+                "branch_name": "Renamed Branch",
+                "phone": "01722222222",
+            },
+        )
+        deactivate_response = self._patch(
+            self.branch.pk,
+            {"is_active": False},
+        )
+        reactivate_response = self._patch(
+            self.branch.pk,
+            {"is_active": True},
+        )
+
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(deactivate_response.status_code, 200)
+        self.assertFalse(deactivate_response.json()["branch"]["is_active"])
+        self.assertTrue(reactivate_response.json()["branch"]["is_active"])
+        self.assertTrue(AuditLog.objects.filter(
+            action="UPDATE_BRANCH",
+            object_id=str(self.branch.pk),
+            user=self.admin,
+        ).exists())
+        self.assertTrue(AuditLog.objects.filter(
+            action="DEACTIVATE_BRANCH",
+            object_id=str(self.branch.pk),
+            user=self.admin,
+            description__contains="deactivated",
+        ).exists())
+        self.assertNotIn("01722222222", AuditLog.objects.get(
+            action="UPDATE_BRANCH",
+            object_id=str(self.branch.pk),
+            description__contains="updated",
+        ).description)
+
+    def test_patch_rejects_immutable_unknown_and_invalid_fields(self):
+        self.client.force_login(self.admin)
+
+        invalid_payloads = (
+            {"branch_code": "CHANGED"},
+            {"routing_number": "CHANGED"},
+            {"extra": "value"},
+            {"email": "invalid"},
+            {"is_active": "false"},
+            {"branch_name": 12},
+            {},
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                response = self._patch(self.branch.pk, payload)
+                self.assertEqual(response.status_code, 400)
+
+        missing = self._patch(999999, {"branch_name": "Updated"})
+        self.assertEqual(missing.status_code, 404)
+
+    def test_patch_rejects_duplicate_routing_number_with_conflict(self):
+        self._create_branch(
+            branch_code="BM002",
+            routing_number="RT-UNIQUE",
+        )
+        self.client.force_login(self.admin)
+
+        response = self._patch(
+            self.branch.pk,
+            {"email": "valid@example.invalid"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # Routing number is immutable, so the collision cannot be introduced by PATCH.
+        self.assertEqual(
+            self._patch(
+                self.branch.pk,
+                {"routing_number": "RT-UNIQUE"},
+            ).status_code,
+            400,
+        )
+
+    def test_delete_is_rejected(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.delete(self.detail_url.format(self.branch.pk))
+
+        self.assertEqual(response.status_code, 405)
+        self.assertTrue(Branch.objects.filter(pk=self.branch.pk).exists())
+
+    def test_authorization_is_enforced_on_collection_and_detail_methods(self):
+        manager = User.objects.create_user(username="branch_api_manager")
+        manager.groups.add(Group.objects.get_or_create(name="Manager")[0])
+        teller = User.objects.create_user(username="branch_api_teller")
+        teller.groups.add(Group.objects.get_or_create(name="Teller")[0])
+        ungrouped_superuser = User.objects.create_superuser(
+            username="branch_api_superuser",
+            email="branch-api-superuser@example.invalid",
+            password="test-password",
+        )
+        inactive_admin = User.objects.create_user(
+            username="branch_api_inactive",
+            is_active=False,
+        )
+        inactive_admin.groups.add(self.admin_group)
+        conflicting_admin = User.objects.create_user(
+            username="branch_api_conflicting",
+        )
+        conflicting_admin.groups.add(
+            self.admin_group,
+            Group.objects.get_or_create(name="Manager")[0],
+        )
+
+        denied = (
+            (None, 401),
+            (manager, 403),
+            (teller, 403),
+            (ungrouped_superuser, 403),
+            (inactive_admin, 401),
+            (conflicting_admin, 403),
+        )
+        for user, expected_status in denied:
+            with self.subTest(user=user.username if user else "anonymous"):
+                self.client.logout()
+                if user is not None:
+                    self.client.force_login(user)
+                responses = (
+                    self.client.get(self.collection_url),
+                    self.client.get(self.detail_url.format(self.branch.pk)),
+                    self._post(self.valid_payload),
+                    self._patch(self.branch.pk, {"branch_name": "Unauthorized"}),
+                )
+                self.assertEqual(
+                    [response.status_code for response in responses],
+                    [expected_status] * 4,
+                )
+
+    def test_write_methods_require_csrf(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.admin)
+
+        create_response = self._post(self.valid_payload, client=client)
+        patch_response = self._patch(
+            self.branch.pk,
+            {"branch_name": "No CSRF"},
+            client=client,
+        )
+
+        self.assertEqual(create_response.status_code, 403)
+        self.assertEqual(patch_response.status_code, 403)
+        self.assertEqual(create_response.json(), {
+            "success": False,
+            "message": "CSRF verification failed.",
+        })
+        self.assertEqual(patch_response.json(), {
+            "success": False,
+            "message": "CSRF verification failed.",
+        })
+
+    def test_deactivation_preserves_customer_account_and_staff_references(self):
+        staff_user = User.objects.create_user(username="branch_reference_staff")
+        profile = StaffProfile.objects.create(
+            user=staff_user,
+            employee_id="BRANCH-STAFF-001",
+            branch=self.branch,
+        )
+        customer = Customer.objects.create(
+            full_name="Branch Reference Customer",
+            phone="01700000000",
+            nid_number=f"BR-NID-{Customer.objects.count():06d}",
+            present_address="Customer address",
+            district="Dhaka",
+            home_branch=self.branch,
+            created_by=self.admin,
+        )
+        product = AccountProduct.objects.create(
+            product_code="BR-TEST",
+            product_name="Branch Test Product",
+            minimum_balance=Decimal("0.00"),
+        )
+        account = Account.objects.create(
+            customer=customer,
+            product=product,
+            branch=self.branch,
+        )
+        self.client.force_login(self.admin)
+
+        response = self._patch(self.branch.pk, {"is_active": False})
+
+        self.assertEqual(response.status_code, 200)
+        customer.refresh_from_db()
+        account.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertEqual(customer.home_branch_id, self.branch.pk)
+        self.assertEqual(account.branch_id, self.branch.pk)
+        self.assertEqual(profile.branch_id, self.branch.pk)
+        self.assertTrue(Customer.objects.filter(pk=customer.pk).exists())
+        self.assertTrue(Account.objects.filter(pk=account.pk).exists())
+        self.assertTrue(StaffProfile.objects.filter(pk=profile.pk).exists())
+
+        options_response = self.client.get(self.options_url)
+        self.assertEqual(options_response.status_code, 200)
+        option_ids = [
+            branch["id"]
+            for branch in options_response.json()["branches"]
+        ]
+        self.assertNotIn(self.branch.pk, option_ids)
+
+    def test_existing_branch_options_contract_remains_active_only(self):
+        inactive = self._create_branch(
+            branch_code="BM099",
+            branch_name="Inactive Options Branch",
+            is_active=False,
+        )
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.options_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()["branches"][0]), {
+            "id",
+            "branch_code",
+            "branch_name",
+        })
+        self.assertNotIn(
+            inactive.pk,
+            [branch["id"] for branch in response.json()["branches"]],
+        )

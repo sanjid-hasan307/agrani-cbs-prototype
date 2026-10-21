@@ -6,6 +6,8 @@ from .views import (
     manager_session_api,
     admin_session_api,
     admin_customers_api,
+    admin_branches_api,
+    admin_branch_detail_api,
     admin_branch_options_api,
     admin_accounts_api,
     admin_account_customer_options_api,
@@ -44,6 +46,16 @@ urlpatterns = [
         'admin/branches/options/',
         admin_branch_options_api,
         name='admin_branch_options_api'
+    ),
+    path(
+        'admin/branches/',
+        admin_branches_api,
+        name='admin_branches_api'
+    ),
+    path(
+        'admin/branches/<int:branch_id>/',
+        admin_branch_detail_api,
+        name='admin_branch_detail_api'
     ),
     path(
         'admin/customers/',
