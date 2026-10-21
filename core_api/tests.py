@@ -825,6 +825,453 @@ class AdminBranchOptionsApiTests(TestCase):
                 self.assertEqual(response.status_code, expected_status)
 
 
+class AdminAccountsApiTests(TestCase):
+    endpoint = "/api/admin/accounts/"
+    customer_options_endpoint = "/api/admin/accounts/customers/options/"
+    product_options_endpoint = "/api/admin/accounts/products/options/"
+
+    def setUp(self):
+        self.admin_group, _ = Group.objects.get_or_create(name="Admin")
+        self.admin = User.objects.create_user(username="accounts_admin")
+        self.admin.groups.add(self.admin_group)
+        self.manager_group, _ = Group.objects.get_or_create(name="Manager")
+        self.teller_group, _ = Group.objects.get_or_create(name="Teller")
+        self.branch = Branch.objects.create(
+            branch_code="ACBR001",
+            branch_name="Account Branch",
+            district="Dhaka",
+            address="Account branch address",
+        )
+        self.other_branch = Branch.objects.create(
+            branch_code="ACBR002",
+            branch_name="Other Account Branch",
+            district="Chattogram",
+            address="Other branch address",
+        )
+        self.customer = self._create_customer("Eligible Account Customer")
+        self.product = AccountProduct.objects.create(
+            product_code="ACCTEST",
+            product_name="Account Test Product",
+            product_type=AccountProduct.ProductType.SAVINGS,
+            minimum_balance=Decimal("100.00"),
+            currency="USD",
+            is_active=True,
+        )
+
+    def _create_customer(self, full_name, *, branch=None, status=Customer.Status.ACTIVE):
+        return Customer.objects.create(
+            full_name=full_name,
+            phone="01700000000",
+            nid_number=f"NID-ACCT-{Customer.objects.count():08d}",
+            present_address="Private customer address",
+            district="Dhaka",
+            home_branch=branch or self.branch,
+            created_by=self.admin,
+            status=status,
+        )
+
+    def _opening_payload(self, *, customer=None, product=None, branch=None):
+        return {
+            "customer": (customer or self.customer).pk,
+            "product": (product or self.product).pk,
+            "branch": (branch or self.branch).pk,
+        }
+
+    def _post_opening(self, payload=None, *, client=None, raw_body=None):
+        client = client or self.client
+        body = json.dumps(payload) if raw_body is None else raw_body
+        return client.post(
+            self.endpoint,
+            data=body,
+            content_type="application/json",
+        )
+
+    def test_admin_opens_zero_balance_account_with_generated_number_and_product_currency(self):
+        self.client.force_login(self.admin)
+
+        response = self._post_opening(self._opening_payload())
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        account = Account.objects.get(pk=data["account"]["id"])
+        self.assertRegex(account.account_number, r"^ACC\d{8}$")
+        self.assertEqual(account.currency, "USD")
+        self.assertEqual(account.available_balance, Decimal("0.00"))
+        self.assertEqual(account.ledger_balance, Decimal("0.00"))
+        self.assertEqual(account.account_status, Account.AccountStatus.ACTIVE)
+        self.assertEqual(data, {
+            "success": True,
+            "account": {
+                "id": account.pk,
+                "account_number": account.account_number,
+                "customer_name": self.customer.full_name,
+                "customer_cif": self.customer.cif_number,
+                "product_code": self.product.product_code,
+                "product_name": self.product.product_name,
+                "branch_code": self.branch.branch_code,
+                "branch_name": self.branch.branch_name,
+                "currency": "USD",
+                "account_status": Account.AccountStatus.ACTIVE,
+                "opening_date": account.opening_date.isoformat(),
+                "available_balance": "0.00",
+                "ledger_balance": "0.00",
+            },
+        })
+        self.assertNotIn("nid_number", data["account"])
+        self.assertNotIn("phone", data["account"])
+        self.assertNotIn("address", response.content.decode().lower())
+
+    def test_account_creation_audit_is_attributed_to_admin(self):
+        self.client.force_login(self.admin)
+
+        response = self._post_opening(self._opening_payload())
+
+        account = Account.objects.get(pk=response.json()["account"]["id"])
+        audit = AuditLog.objects.get(
+            action="CREATE_ACCOUNT",
+            model_name="Account",
+            object_id=str(account.pk),
+        )
+        self.assertEqual(audit.user, self.admin)
+        self.assertNotIn("NID-", audit.description)
+        self.assertNotIn("01700000000", audit.description)
+
+    def test_audit_failure_rolls_back_account_creation(self):
+        self.client.force_login(self.admin)
+        account_count = Account.objects.count()
+
+        with patch.object(
+            AuditLog.objects,
+            "create",
+            side_effect=DatabaseError("simulated audit failure"),
+        ):
+            response = self._post_opening(self._opening_payload())
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(Account.objects.count(), account_count)
+        self.assertNotIn("simulated audit failure", response.content.decode())
+
+    def test_inactive_and_nonexistent_customers_are_rejected(self):
+        inactive_customer = self._create_customer(
+            "Inactive Account Customer",
+            status=Customer.Status.INACTIVE,
+        )
+        self.client.force_login(self.admin)
+
+        for customer_id in (inactive_customer.pk, 99999):
+            with self.subTest(customer_id=customer_id):
+                payload = self._opening_payload()
+                payload["customer"] = customer_id
+                response = self._post_opening(payload)
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(Account.objects.count(), 0)
+
+    def test_inactive_and_nonexistent_products_are_rejected(self):
+        inactive_product = AccountProduct.objects.create(
+            product_code="ACINACTIVE",
+            product_name="Inactive Product",
+            is_active=False,
+        )
+        self.client.force_login(self.admin)
+
+        for product_id in (inactive_product.pk, 99999):
+            with self.subTest(product_id=product_id):
+                payload = self._opening_payload()
+                payload["product"] = product_id
+                response = self._post_opening(payload)
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(Account.objects.count(), 0)
+
+    def test_inactive_and_nonexistent_branches_are_rejected(self):
+        inactive_branch = Branch.objects.create(
+            branch_code="ACBR003",
+            branch_name="Inactive Account Branch",
+            district="Dhaka",
+            address="Inactive branch address",
+            is_active=False,
+        )
+        self.client.force_login(self.admin)
+
+        for branch_id in (inactive_branch.pk, 99999):
+            with self.subTest(branch_id=branch_id):
+                payload = self._opening_payload()
+                payload["branch"] = branch_id
+                response = self._post_opening(payload)
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(Account.objects.count(), 0)
+
+    def test_account_branch_must_match_customer_home_branch(self):
+        self.client.force_login(self.admin)
+
+        response = self._post_opening(
+            self._opening_payload(branch=self.other_branch)
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("match", response.json()["message"])
+        self.assertEqual(Account.objects.count(), 0)
+
+    def test_invalid_json_unknown_fields_and_missing_ids_are_rejected(self):
+        self.client.force_login(self.admin)
+
+        cases = (
+            ("malformed", None, "{"),
+            ("non_object", None, "[]"),
+            ("unknown", {**self._opening_payload(), "extra": 1}, None),
+            ("missing", {"customer": self.customer.pk, "product": self.product.pk}, None),
+            ("invalid_id_type", {
+                **self._opening_payload(),
+                "branch": True,
+            }, None),
+        )
+        for label, payload, body in cases:
+            with self.subTest(label=label):
+                response = self._post_opening(payload, raw_body=body)
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(Account.objects.count(), 0)
+
+    def test_privileged_and_balance_fields_are_rejected(self):
+        self.client.force_login(self.admin)
+        privileged_fields = (
+            "account_number",
+            "currency",
+            "account_status",
+            "opening_date",
+            "available_balance",
+            "ledger_balance",
+            "created_at",
+            "updated_at",
+        )
+        for field in privileged_fields:
+            with self.subTest(field=field):
+                payload = self._opening_payload()
+                payload[field] = "client-supplied"
+                response = self._post_opening(payload)
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(Account.objects.count(), 0)
+
+    def test_account_list_is_paginated_stable_and_excludes_sensitive_customer_data(self):
+        other_customers = [
+            self._create_customer(f"List Customer {index:02d}")
+            for index in range(11)
+        ]
+        accounts = [
+            Account.objects.create(
+                customer=customer,
+                product=self.product,
+                branch=self.branch,
+            )
+            for customer in [self.customer, *other_customers]
+        ]
+        self.client.force_login(self.admin)
+
+        first_response = self.client.get(self.endpoint)
+        second_response = self.client.get(self.endpoint, {"page": 2})
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        first_data = first_response.json()
+        second_data = second_response.json()
+        self.assertEqual(first_data["pagination"]["page_size"], 10)
+        self.assertEqual(len(first_data["accounts"]), 10)
+        self.assertEqual(len(second_data["accounts"]), 2)
+        self.assertEqual(
+            [row["id"] for row in first_data["accounts"] + second_data["accounts"]],
+            [account.pk for account in sorted(accounts, key=lambda item: item.account_number)],
+        )
+        combined = json.dumps(first_data) + json.dumps(second_data)
+        for sensitive_field in (
+            "nid_number",
+            "passport_number",
+            "phone",
+            "email",
+            "present_address",
+        ):
+            self.assertNotIn(sensitive_field, combined)
+        self.assertNotIn("NID-", combined)
+        self.assertNotIn("01700000000", combined)
+
+    def test_invalid_account_list_pagination_returns_json_error(self):
+        self.client.force_login(self.admin)
+        for page in ("bad", "0", "-2"):
+            with self.subTest(page=page):
+                response = self.client.get(self.endpoint, {"page": page})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["success"], False)
+
+    def test_customer_options_include_only_active_minimal_customer_fields(self):
+        inactive_customer = self._create_customer(
+            "Inactive Customer Option",
+            status=Customer.Status.BLOCKED,
+        )
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.customer_options_endpoint)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["customers"]), 1)
+        option = response.json()["customers"][0]
+        self.assertEqual(option, {
+            "id": self.customer.pk,
+            "cif": self.customer.cif_number,
+            "display_name": self.customer.full_name,
+            "home_branch": {
+                "id": self.branch.pk,
+                "branch_code": self.branch.branch_code,
+                "branch_name": self.branch.branch_name,
+            },
+        })
+        self.assertNotEqual(option["id"], inactive_customer.pk)
+        self.assertNotIn("nid_number", response.content.decode())
+        self.assertNotIn("phone", response.content.decode())
+
+    def test_customer_options_exclude_customers_with_inactive_home_branch(self):
+        inactive_branch = Branch.objects.create(
+            branch_code="ACBR004",
+            branch_name="Inactive Home Branch",
+            district="Dhaka",
+            address="Inactive home branch address",
+            is_active=False,
+        )
+        self._create_customer("Inactive Home Branch Customer", branch=inactive_branch)
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.customer_options_endpoint)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [row["id"] for row in response.json()["customers"]],
+            [self.customer.pk],
+        )
+
+    def test_product_options_include_only_active_minimal_product_fields(self):
+        inactive_product = AccountProduct.objects.create(
+            product_code="ACINACTOPT",
+            product_name="Inactive Option Product",
+            is_active=False,
+        )
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.product_options_endpoint)
+
+        self.assertEqual(response.status_code, 200)
+        product_options = response.json()["products"]
+        self.assertIn({
+            "id": self.product.pk,
+            "product_code": self.product.product_code,
+            "product_name": self.product.product_name,
+            "product_type": self.product.product_type,
+            "currency": self.product.currency,
+        }, product_options)
+        self.assertTrue(all(
+            row["product_code"] != inactive_product.product_code
+            for row in product_options
+        ))
+        self.assertTrue(all(
+            AccountProduct.objects.get(pk=row["id"]).is_active
+            for row in product_options
+        ))
+        self.assertNotIn("minimum_balance", response.content.decode())
+
+    def test_all_account_endpoints_enforce_admin_authorization(self):
+        inactive_admin = User.objects.create_user(
+            username="inactive_accounts_admin",
+            is_active=False,
+        )
+        inactive_admin.groups.add(self.admin_group)
+        manager = User.objects.create_user(username="accounts_manager")
+        manager.groups.add(self.manager_group)
+        teller = User.objects.create_user(username="accounts_teller")
+        teller.groups.add(self.teller_group)
+        ungrouped_superuser = User.objects.create_superuser(
+            username="accounts_superuser",
+            email="accounts-superuser@example.com",
+            password="test-password",
+        )
+        conflicting_admin = User.objects.create_user(
+            username="conflicting_accounts_admin",
+        )
+        conflicting_admin.groups.add(self.admin_group, self.manager_group)
+
+        requests = (
+            (self.endpoint, "get", None, 401),
+            (self.customer_options_endpoint, "get", None, 401),
+            (self.product_options_endpoint, "get", None, 401),
+        )
+        for endpoint, method, user, expected_status in requests:
+            with self.subTest(endpoint=endpoint, user="anonymous"):
+                response = getattr(self.client, method)(endpoint)
+                self.assertEqual(response.status_code, expected_status)
+
+        denied_users = (
+            ("inactive", inactive_admin, 401),
+            ("manager", manager, 403),
+            ("teller", teller, 403),
+            ("ungrouped_superuser", ungrouped_superuser, 403),
+            ("conflicting_admin", conflicting_admin, 403),
+        )
+        for endpoint in (
+            self.endpoint,
+            self.customer_options_endpoint,
+            self.product_options_endpoint,
+        ):
+            for label, user, expected_status in denied_users:
+                with self.subTest(endpoint=endpoint, user=label):
+                    self.client.logout()
+                    self.client.force_login(user)
+                    response = self.client.get(endpoint)
+                    self.assertEqual(response.status_code, expected_status)
+
+        self.client.logout()
+        anonymous_post = self._post_opening(self._opening_payload())
+        self.assertIn(anonymous_post.status_code, (401, 403))
+        self.assertEqual(Account.objects.count(), 0)
+        self.client.force_login(manager)
+        denied_post = self._post_opening(self._opening_payload())
+        self.assertEqual(denied_post.status_code, 403)
+
+    def test_csrf_is_required_for_account_opening(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.admin)
+        client.get("/api/csrf/")
+
+        missing_token = self._post_opening(
+            self._opening_payload(),
+            client=client,
+        )
+        self.assertEqual(missing_token.status_code, 403)
+        self.assertEqual(Account.objects.count(), 0)
+
+        csrf_token = client.cookies["csrftoken"].value
+        valid_response = client.post(
+            self.endpoint,
+            data=json.dumps(self._opening_payload()),
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(valid_response.status_code, 201)
+
+    def test_integrity_error_is_handled_as_conflict(self):
+        self.client.force_login(self.admin)
+
+        with patch(
+            "core_api.views.Account.save",
+            side_effect=IntegrityError("internal uniqueness detail"),
+        ):
+            response = self._post_opening(self._opening_payload())
+
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn("internal uniqueness detail", response.content.decode())
+        self.assertEqual(Account.objects.count(), 0)
+
+    def test_account_endpoint_rejects_other_methods(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.patch(self.endpoint)
+
+        self.assertEqual(response.status_code, 405)
+
+
 class ManagerPendingTransactionsApiTests(ManagerApiTestCase):
     def test_authenticated_manager_receives_pending_transactions(self):
         transaction = self._create_transaction(self.account_a)

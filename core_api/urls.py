@@ -7,6 +7,9 @@ from .views import (
     admin_session_api,
     admin_customers_api,
     admin_branch_options_api,
+    admin_accounts_api,
+    admin_account_customer_options_api,
+    admin_account_product_options_api,
     teller_session_api,
     teller_transactions_api,
     manager_pending_transactions_api,
@@ -46,6 +49,21 @@ urlpatterns = [
         'admin/customers/',
         admin_customers_api,
         name='admin_customers_api'
+    ),
+    path(
+        'admin/accounts/',
+        admin_accounts_api,
+        name='admin_accounts_api'
+    ),
+    path(
+        'admin/accounts/customers/options/',
+        admin_account_customer_options_api,
+        name='admin_account_customer_options_api'
+    ),
+    path(
+        'admin/accounts/products/options/',
+        admin_account_product_options_api,
+        name='admin_account_product_options_api'
     ),
     path(
         'teller/session/',

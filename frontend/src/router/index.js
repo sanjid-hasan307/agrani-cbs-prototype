@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import LoginView from '../views/LoginView.vue'
 import AdminDashboard from '../views/AdminDashboard.vue'
 import AdminCustomers from '../views/AdminCustomers.vue'
+import AdminAccounts from '../views/AdminAccounts.vue'
 import ManagerDashboard from '../views/ManagerDashboard.vue'
 import TellerDashboard from '../views/TellerDashboard.vue'
 
@@ -29,6 +30,11 @@ const router = createRouter({
       path: '/dashboard/admin/customers',
       name: 'AdminCustomers',
       component: AdminCustomers
+    },
+    {
+      path: '/dashboard/admin/accounts',
+      name: 'AdminAccounts',
+      component: AdminAccounts
     },
     {
       path: '/dashboard/manager',

@@ -1,5 +1,6 @@
 import json
 from datetime import date
+from decimal import Decimal
 
 from django.contrib.auth import authenticate, login as django_login
 from django.db import DatabaseError, IntegrityError, transaction
@@ -21,6 +22,8 @@ from django.db.models import Q
 from audit.models import AuditLog
 from branches.models import Branch
 from customers.models import Customer
+from accounts.models import Account
+from products.models import AccountProduct
 from transactions.models import Transaction
 from transactions.services.authorization_service import (
     approve_transaction,
@@ -491,6 +494,334 @@ def admin_branch_options_api(request):
                 "branch_name": branch.branch_name,
             }
             for branch in branches
+        ],
+    })
+
+
+_ACCOUNT_OPENING_FIELDS = {"customer", "product", "branch"}
+_MAX_ACCOUNT_REQUEST_BYTES = 1024
+
+
+def _account_api_error(message, *, status_code=400):
+    return JsonResponse(
+        {"success": False, "message": message},
+        status=status_code,
+    )
+
+
+def _parse_account_opening(request):
+    if request.content_type != "application/json":
+        return None, _account_api_error(
+            "Content-Type must be application/json."
+        )
+
+    content_length = request.META.get("CONTENT_LENGTH")
+    if content_length:
+        try:
+            if int(content_length) > _MAX_ACCOUNT_REQUEST_BYTES:
+                return None, _account_api_error(
+                    "Request body is too large.",
+                    status_code=413,
+                )
+        except ValueError:
+            return None, _account_api_error("Invalid Content-Length header.")
+
+    try:
+        body = request.body
+    except RequestDataTooBig:
+        return None, _account_api_error(
+            "Request body is too large.",
+            status_code=413,
+        )
+
+    if len(body) > _MAX_ACCOUNT_REQUEST_BYTES:
+        return None, _account_api_error(
+            "Request body is too large.",
+            status_code=413,
+        )
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, _account_api_error("Request body must be valid JSON.")
+
+    if not isinstance(payload, dict):
+        return None, _account_api_error(
+            "Request body must be a JSON object."
+        )
+    if payload.keys() - _ACCOUNT_OPENING_FIELDS:
+        return None, _account_api_error(
+            "Request contains unsupported account-opening fields."
+        )
+    if payload.keys() != _ACCOUNT_OPENING_FIELDS:
+        return None, _account_api_error(
+            "Customer, product, and branch IDs are required."
+        )
+
+    for field, value in payload.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return None, _account_api_error(
+                f"{field.capitalize()} must be a valid database ID."
+            )
+
+    return payload, None
+
+
+class _AccountAuditWriteFailed(Exception):
+    pass
+
+
+@csrf_protect
+def admin_accounts_api(request):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    if request.method == "POST":
+        payload, error_response = _parse_account_opening(request)
+        if error_response:
+            return error_response
+
+        try:
+            with transaction.atomic():
+                try:
+                    customer = Customer.objects.select_for_update().get(
+                        pk=payload["customer"]
+                    )
+                except Customer.DoesNotExist:
+                    return _account_api_error(
+                        "Select an existing active customer."
+                    )
+
+                try:
+                    product = AccountProduct.objects.select_for_update().get(
+                        pk=payload["product"]
+                    )
+                except AccountProduct.DoesNotExist:
+                    return _account_api_error(
+                        "Select an existing active account product."
+                    )
+
+                try:
+                    branch = Branch.objects.select_for_update().get(
+                        pk=payload["branch"]
+                    )
+                except Branch.DoesNotExist:
+                    return _account_api_error(
+                        "Select an existing active branch."
+                    )
+
+                if customer.status != Customer.Status.ACTIVE:
+                    return _account_api_error(
+                        "Select an existing active customer."
+                    )
+                if not product.is_active:
+                    return _account_api_error(
+                        "Select an existing active account product."
+                    )
+                if not branch.is_active:
+                    return _account_api_error(
+                        "Select an existing active branch."
+                    )
+                if customer.home_branch_id != branch.pk:
+                    return _account_api_error(
+                        "The account branch must match the customer's home branch."
+                    )
+
+                account = Account(
+                    customer=customer,
+                    product=product,
+                    branch=branch,
+                    currency=product.currency,
+                    available_balance=Decimal("0.00"),
+                    ledger_balance=Decimal("0.00"),
+                    account_status=Account.AccountStatus.ACTIVE,
+                )
+                try:
+                    account.save()
+                except ValidationError as error:
+                    if "account_number" in getattr(error, "message_dict", {}):
+                        return _account_api_error(
+                            "Account opening conflicts with an existing record.",
+                            status_code=409,
+                        )
+                    return _account_api_error(
+                        "The selected customer, product, or branch is not eligible for account opening."
+                    )
+
+                try:
+                    AuditLog.objects.create(
+                        user=request.user,
+                        action="CREATE_ACCOUNT",
+                        model_name="Account",
+                        object_id=str(account.pk),
+                        description=(
+                            f"Opened account {account.account_number} "
+                            f"for customer {customer.cif_number}."
+                        ),
+                        ip_address=request.META.get("REMOTE_ADDR"),
+                    )
+                except DatabaseError as error:
+                    raise _AccountAuditWriteFailed from error
+        except IntegrityError:
+            return _account_api_error(
+                "Account opening conflicts with an existing record.",
+                status_code=409,
+            )
+        except _AccountAuditWriteFailed:
+            return _account_api_error(
+                "Account opening could not be completed.",
+                status_code=500,
+            )
+
+        return JsonResponse(
+            {
+                "success": True,
+                "account": {
+                    "id": account.pk,
+                    "account_number": account.account_number,
+                    "customer_name": customer.full_name,
+                    "customer_cif": customer.cif_number,
+                    "product_code": product.product_code,
+                    "product_name": product.product_name,
+                    "branch_code": branch.branch_code,
+                    "branch_name": branch.branch_name,
+                    "currency": account.currency,
+                    "account_status": account.account_status,
+                    "opening_date": account.opening_date.isoformat(),
+                    "available_balance": "0.00",
+                    "ledger_balance": "0.00",
+                },
+            },
+            status=201,
+        )
+
+    if request.method != "GET":
+        return _account_api_error(
+            "GET or POST method required.",
+            status_code=405,
+        )
+
+    page_value = request.GET.get("page", "1")
+    try:
+        page_number = int(page_value)
+        if page_number < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return _account_api_error(
+            "Page must be a positive integer."
+        )
+
+    accounts = Account.objects.select_related(
+        "customer",
+        "product",
+        "branch",
+    ).only(
+        "id",
+        "account_number",
+        "customer__full_name",
+        "customer__cif_number",
+        "product__product_code",
+        "product__product_name",
+        "branch__branch_code",
+        "branch__branch_name",
+        "currency",
+        "account_status",
+        "opening_date",
+    ).order_by("account_number", "id")
+    paginator = Paginator(accounts, 10)
+    page_obj = paginator.get_page(page_number)
+
+    return JsonResponse({
+        "success": True,
+        "pagination": {
+            "page": page_obj.number,
+            "page_size": paginator.per_page,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        },
+        "accounts": [
+            {
+                "id": account.pk,
+                "account_number": account.account_number,
+                "customer_name": account.customer.full_name,
+                "customer_cif": account.customer.cif_number,
+                "product_code": account.product.product_code,
+                "product_name": account.product.product_name,
+                "branch_code": account.branch.branch_code,
+                "branch_name": account.branch.branch_name,
+                "currency": account.currency,
+                "account_status": account.account_status,
+                "opening_date": account.opening_date.isoformat(),
+            }
+            for account in page_obj.object_list
+        ],
+    })
+
+
+@require_GET
+def admin_account_customer_options_api(request):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    customers = Customer.objects.filter(
+        status=Customer.Status.ACTIVE,
+        home_branch__is_active=True,
+    ).select_related("home_branch").only(
+        "id",
+        "cif_number",
+        "full_name",
+        "home_branch__id",
+        "home_branch__branch_code",
+        "home_branch__branch_name",
+    ).order_by("full_name", "id")
+
+    return JsonResponse({
+        "success": True,
+        "customers": [
+            {
+                "id": customer.pk,
+                "cif": customer.cif_number,
+                "display_name": customer.full_name,
+                "home_branch": {
+                    "id": customer.home_branch_id,
+                    "branch_code": customer.home_branch.branch_code,
+                    "branch_name": customer.home_branch.branch_name,
+                },
+            }
+            for customer in customers
+        ],
+    })
+
+
+@require_GET
+def admin_account_product_options_api(request):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    products = AccountProduct.objects.filter(is_active=True).only(
+        "id",
+        "product_code",
+        "product_name",
+        "product_type",
+        "currency",
+    ).order_by("product_code", "id")
+
+    return JsonResponse({
+        "success": True,
+        "products": [
+            {
+                "id": product.pk,
+                "product_code": product.product_code,
+                "product_name": product.product_name,
+                "product_type": product.product_type,
+                "currency": product.currency,
+            }
+            for product in products
         ],
     })
 

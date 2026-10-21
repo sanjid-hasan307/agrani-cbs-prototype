@@ -95,12 +95,12 @@ onMounted(verifyAdminSession)
           <span class="open-section">View customer list</span>
         </RouterLink>
 
-        <article class="management-card">
+        <RouterLink class="management-card management-card-link" to="/dashboard/admin/accounts">
           <span class="card-icon" aria-hidden="true">02</span>
           <h2>Account Management</h2>
           <p>Account opening and account administration.</p>
-          <span class="coming-soon">Coming Soon</span>
-        </article>
+          <span class="open-section">Manage accounts</span>
+        </RouterLink>
 
         <article class="management-card">
           <span class="card-icon" aria-hidden="true">03</span>
