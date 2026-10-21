@@ -1,214 +1,157 @@
-# Agrani Bank Core Banking System (CBS) — Prototype
+# Agrani Bank PLC Core Banking System (CBS) — Internship Prototype
 
 [![GitHub repository](https://img.shields.io/badge/GitHub-agrani--cbs--prototype-181717?logo=github)](https://github.com/sanjid-hasan307/agrani-cbs-prototype)
 
-> **Development prototype:** This internship project demonstrates selected core-banking workflows using demonstration and locally configured data. It is not a production banking platform and must not be used to process real customer information or financial transactions.
+> **Development prototype only.** This internship project demonstrates selected core-banking workflows. It is not an official Agrani Bank system, a complete banking platform, or suitable for production. Use only locally prepared demonstration data; never enter real customer or banking data.
 
-Repository: [sanjid-hasan307/agrani-cbs-prototype](https://github.com/sanjid-hasan307/agrani-cbs-prototype)
+## Project overview
 
-## Overview
+The project is a modular Django application with a separate Vue 3 web client. It models branches, staff, customers, account products, accounts, transactions, transaction entries, and audit records. Its scope is a learning prototype for staff sign-in and selected Teller and Manager transaction workflows—not a complete Core Banking System.
 
-This modular Django application models branches, staff, customers, account products, and accounts. It implements Teller-initiated deposit, withdrawal, and transfer requests, with a separate Manager maker-checker approval workflow. Django-rendered dashboards provide the implemented Teller, Manager, and Auditor views. A Django REST Framework API and a separate, developing Vue 3 frontend are also included.
+## Implemented and verified
 
-Transactions are created as pending requests. Manager approval posts an eligible transaction and updates account balances; rejection leaves balances unchanged. The backend is configured for PostgreSQL and uses Django sessions for staff authentication.
+- Staff sign-in uses Django authentication and sessions. Django Groups are used to identify roles such as Teller, Manager, and Auditor.
+- Tellers can submit deposit, withdrawal, and internal transfer **requests** through the Django dashboard and the Vue client.
+- Requests are initially pending. Account balances are not changed when a Teller submits a request.
+- Managers can review pending requests and approve or reject them. The approval service prevents a maker from approving or rejecting their own request. An approved request is posted; a rejected request does not change balances.
+- Posting uses `Decimal` amounts, atomic database transactions, row locks on affected accounts, and debit/credit entry balance validation. It updates the account's available and ledger balances.
+- Tellers can view and filter their own transaction history. Manager pending requests can be filtered and paginated.
+- Audit records are created for transaction initiation and Manager approval or rejection.
+- The Vue application has login, Teller, and Manager screens connected to Django APIs. Django-rendered Teller, Manager, and Auditor dashboards are also present.
 
-## Implemented Features
+Here, “ledger balance” refers to a balance field on the account model. The code does not establish a complete general-ledger accounting subsystem.
 
-- Branch, staff profile, customer, account product, and account records.
-- Teller deposit, withdrawal, and internal transfer requests.
-- Manager review and approval or rejection of pending transactions.
-- Debit/credit transaction entries with balance validation.
-- Decimal monetary amounts, atomic transaction services, and row locking during posting.
-- Django Group role checks and branch-access checks in the relevant Teller services and Django Manager dashboard actions.
-- Audit-log records for transaction initiation and Manager approval or rejection.
-- Django REST Framework login, session-check, and transaction API views.
-- Django-rendered staff login and dashboards; the Vue client remains in development.
-
-## Technology Stack
+## Technology
 
 | Area | Technologies |
 | --- | --- |
 | Backend | Python, Django 6.1.1, Django REST Framework 3.18.1 |
-| Database | PostgreSQL, through `psycopg2-binary` |
+| Database | PostgreSQL, using `psycopg2-binary` |
 | Frontend | Vue 3, Vite, Vue Router, Pinia, Axios |
-| Django-rendered UI | HTML, CSS, Bootstrap, Django templates |
-| Authentication | Django authentication and session-based sign-in |
+| Other interface | Django templates, HTML, CSS, Bootstrap |
+| Authentication | Django authentication with session-based sign-in |
 
-The frontend package declares Node.js `^22.18.0` or `>=24.12.0`.
+The repository does not pin a Python version. The frontend package requires Node.js `^22.18.0` or `>=24.12.0`.
 
-## System Architecture
+## Application routes
 
-```text
-Django templates -> Django views -> transaction services -> PostgreSQL
-Vue 3 + Vite     -> Django APIs  -> views/services        -> PostgreSQL
-```
-
-The Django project is divided into apps for core banking records, users, transactions, and audit logs. Transaction business operations are organized in `transactions/services/`. Django templates provide the implemented role dashboards. The Vue application in `frontend/` is a separate client and does not replace those dashboards.
-
-### API routes
-
-The following routes are wired in the Django URL configuration:
+The Vue client uses the following Django API routes:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/login/` | Authenticate and establish a Django session |
-| `GET` | `/api/csrf/` | Set the CSRF cookie |
-| `GET` | `/api/manager/session/` | Check the current session's Manager role |
+| `POST` | `/api/login/` | Sign in and establish a Django session |
+| `GET` | `/api/csrf/` | Obtain the CSRF cookie used by the client |
+| `GET` | `/api/teller/session/` | Check the signed-in Teller session |
+| `GET` | `/api/teller/transactions/` | Get the Teller's transaction history |
 | `POST` | `/api/transactions/deposit/` | Submit a deposit request |
 | `POST` | `/api/transactions/withdraw/` | Submit a withdrawal request |
 | `POST` | `/api/transactions/transfer/` | Submit a transfer request |
-| `POST` | `/api/transactions/<pk>/approve/` | Approve a transaction |
-| `POST` | `/api/transactions/<pk>/reject/` | Reject a transaction |
+| `GET` | `/api/manager/session/` | Check the signed-in Manager session |
+| `GET` | `/api/manager/pending-transactions/` | Get pending requests for the Manager view |
+| `POST` | `/api/manager/transactions/<id>/approve/` | Approve a pending request |
+| `POST` | `/api/manager/transactions/<id>/reject/` | Reject a pending request |
 
-The transaction submission services create pending requests; they do not post balances at creation.
+The Django URL configuration also includes `/api/transactions/<id>/approve/` and `/api/transactions/<id>/reject/` endpoints.
 
-## Role-Based Workflows
-
-### Teller
-
-The Django Teller dashboard is restricted to users in the Teller group. Tellers can submit deposit, withdrawal, and transfer requests, and view their own recent transactions with account-number, transaction-type, and status filters. Teller operations use service-level checks to restrict account access to the staff member's branch, except for the implemented superuser bypass.
-
-### Manager
-
-The Django Manager dashboard shows pending requests for the Manager's branch and supports account-number and transaction-type filtering. Managers can approve or reject requests through the dashboard. A maker cannot approve or reject their own request. Approval posts the transaction and applies its balance changes; rejection records an optional reason and does not change balances.
-
-### Auditor
-
-The Django Auditor dashboard displays the signed-in staff member and available branch information. Transaction-log review, user activity reports, and reconciliation reports are placeholders marked as coming soon; those Auditor reporting workflows are not implemented.
-
-### Vue frontend status
-
-The Vue application has a landing page and login flow. Its early Manager dashboard checks the session and role, then displays an under-development notice; it is not the completed Manager transaction dashboard. The Teller, Manager approval/rejection, and Auditor workflows described above are Django template workflows.
-
-## Project Structure
-
-```text
-.
-├── accounts/                 # Account model and tests
-├── audit/                    # Audit-log model and tests
-├── branches/                 # Branch model and tests
-├── config/                   # Django settings and root URL configuration
-├── core_api/                 # Login, CSRF, and Manager-session API
-├── customers/                # Customer model and tests
-├── products/                 # Account product model and tests
-├── transactions/
-│   ├── services/             # Deposit, withdrawal, transfer, authorization, posting
-│   ├── models.py             # Transactions and debit/credit entries
-│   ├── serializers.py        # Transaction request validation
-│   ├── urls.py
-│   └── views.py              # Transaction API views
-├── users/
-│   ├── services/             # Branch permission helpers
-│   ├── templates/users/      # Django login and role dashboards
-│   ├── dashboard_views.py    # Django dashboard workflows
-│   ├── models.py             # Staff profiles
-│   └── views.py              # Session login and logout
-├── frontend/                 # Separate Vue 3 + Vite application
-├── manage.py
-└── requirements.txt
-```
-
-## Local Development
+## Local setup on Windows
 
 ### Prerequisites
 
-- Python and pip compatible with the pinned packages in `requirements.txt`.
-- PostgreSQL available locally.
-- Node.js and npm meeting the frontend package's engine requirement above.
+- Python and pip, with a Python version compatible with the pinned Django release.
+- PostgreSQL installed and running locally.
+- Node.js and npm meeting the frontend version requirement above.
 
-### Backend setup (Windows PowerShell)
+### 1. Configure PostgreSQL and the backend
 
-Run from the repository root:
+From the repository root, open PowerShell and create a Python virtual environment:
 
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-Copy-Item .env.example .env
 ```
 
-Create a local PostgreSQL database and configure the copied `.env` for your development environment. The checked-in `.env.example` contains placeholders; do not commit local credentials or secrets.
+Create a local PostgreSQL database using pgAdmin or another PostgreSQL administration tool. Copy the environment template and edit the local copy:
 
-Apply migrations and create a local administrator account:
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+Set the database name, username, password, host, and port in `.env` to match your local PostgreSQL setup. Set a local Django `SECRET_KEY` as well. The settings read these values from the environment; `.env` is ignored by Git. Never put actual credentials or secrets in this README or commit them.
+
+Apply the database migrations:
 
 ```powershell
 python manage.py migrate
+```
+
+Optionally create a local Django administrator account:
+
+```powershell
 python manage.py createsuperuser
 ```
 
-Start the Django development server:
+There are no shared demo credentials. To exercise the role workflows, prepare local users, role groups, staff profiles, branches, and account data in the application.
+
+Start the backend from the repository root:
 
 ```powershell
 python manage.py runserver
 ```
 
-To try role dashboards, configure local branches, staff profiles, and Django role groups with demonstration data. No shared demo credentials are provided.
+The Django development server is available at <http://localhost:8000/>.
 
-### Vue frontend
+### 2. Install and start the Vue client
 
-In another terminal, run:
+In a second PowerShell terminal, from the repository root:
 
 ```powershell
-Set-Location frontend
-npm install
+Set-Location .\frontend
+npm ci
 npm run dev
 ```
 
-Vite runs separately from Django. The current Vue API client points to the local backend at `http://localhost:8000/api`.
+Vite serves the client at <http://localhost:5173/>. The client is configured to call the Django API at `http://localhost:8000/api`.
 
-### Checks and tests
+## Tests and production build
 
-From the repository root, with the Python environment active:
+With the virtual environment activated and PostgreSQL running, run the backend test suite from the repository root:
 
 ```powershell
-python manage.py check
 python manage.py test
 ```
 
-From `frontend/`, the available build and preview commands are:
+The frontend package does not define a test script. To build its production assets, run from `frontend`:
 
 ```powershell
 npm run build
-npm run preview
 ```
 
-The repository contains Django tests for models, services, permissions, and dashboard behavior. No test coverage percentage is claimed.
+## Known limitations and security precautions
 
-## Security Implementation and Limitations
-
-Django authentication and session middleware support staff sign-in. Django-rendered forms include CSRF tokens; the Vue API client sends cookies and the CSRF header. Django Groups support role checks. Teller service operations and Django Manager dashboard actions include branch-access checks, while Manager authorization enforces the maker-checker rule. Transaction services use atomic database blocks, `Decimal` amounts, debit/credit validation, and row locking during posting. Transaction initiation and Manager authorization actions are recorded in audit logs.
-
-These are prototype application controls, not a security certification or production security assessment. The checked-in settings default to debug mode and a permissive host configuration, so they are not suitable for production. Do not use real credentials, customer data, or funds. Production use would require a dedicated security review, hardened environment-specific settings, operational controls, and applicable organizational and regulatory approval.
+- This is an internship prototype, not a production banking system. Do not process real funds or use real customer, account, or credential data.
+- The checked-in Django settings default to `DEBUG=True` and a permissive `ALLOWED_HOSTS` value. These are development defaults, not production safeguards. No production deployment configuration or security certification is provided.
+- Keep `.env` and all other secret-bearing files out of Git. Do not hard-code credentials, passwords, or secret keys. Use local demonstration credentials only.
+- Audit records cover the implemented transaction initiation and Manager decision actions; this is not a claim of comprehensive audit coverage.
+- The Auditor dashboard's reporting options are placeholders. Full Auditor transaction review, activity reporting, and reconciliation workflows are not implemented.
+- The code does not provide a complete general ledger or a verified transaction reversal workflow. A `REVERSED` status value exists, but that alone does not implement reversal processing.
+- The Vue client and Django-rendered dashboards are prototype interfaces. Their presence does not imply complete banking operations, deployment hardening, or regulatory compliance.
 
 ## Screenshots
-### CBS Landing Page
 
-![Agrani Bank CBS Landing Page](docs/screenshots/landing-page.png)
+### Landing page
 
-### Secure Login Modal
+![Agrani CBS landing page](docs/screenshots/landing-page.png)
 
-![Agrani Bank CBS Secure Login Modal](docs/screenshots/login-modal.png)
+### Login modal
 
-### Django Manager Dashboard — Transaction Approval Queue
+![Agrani CBS login modal](docs/screenshots/login-modal.png)
 
-![Agrani Bank CBS Manager Dashboard](docs/screenshots/manager-dashboard.png)
+### Manager dashboard
 
-### Django Teller Dashboard
+![Agrani CBS Manager dashboard](docs/screenshots/manager-dashboard.png)
 
-![Agrani Bank CBS Teller Dashboard](docs/screenshots/teller-dashboard.png)
+### Teller dashboard
 
-
-Screenshots will be added when the interfaces are prepared for portfolio presentation.
-
-- Django Teller dashboard — *Screenshot to be added*
-- Django Manager dashboard — *Screenshot to be added*
-- Django Auditor dashboard — *Screenshot to be added*
-- Vue frontend — *Screenshot to be added*
-
-## Future Improvements
-
-- Complete the Vue role workflows and integrate them with the backend operations.
-- Implement Auditor transaction review, staff activity history, and reconciliation reporting.
-- Expand operational, authorization, and integration tests as workflows evolve.
-- Harden settings, access controls, monitoring, and operational procedures before any production consideration.
-- Document a safe, repeatable way to prepare local demonstration data.
+![Agrani CBS Teller dashboard](docs/screenshots/teller-dashboard.png)
