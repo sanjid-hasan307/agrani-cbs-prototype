@@ -4,6 +4,7 @@ import AdminDashboard from '../views/AdminDashboard.vue'
 import AdminCustomers from '../views/AdminCustomers.vue'
 import AdminAccounts from '../views/AdminAccounts.vue'
 import AdminBranches from '../views/AdminBranches.vue'
+import AdminStaff from '../views/AdminStaff.vue'
 import ManagerDashboard from '../views/ManagerDashboard.vue'
 import TellerDashboard from '../views/TellerDashboard.vue'
 
@@ -41,6 +42,11 @@ const router = createRouter({
       path: '/dashboard/admin/branches',
       name: 'AdminBranches',
       component: AdminBranches
+    },
+    {
+      path: '/dashboard/admin/staff',
+      name: 'AdminStaff',
+      component: AdminStaff
     },
     {
       path: '/dashboard/manager',

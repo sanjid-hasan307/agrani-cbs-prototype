@@ -109,12 +109,12 @@ onMounted(verifyAdminSession)
           <span class="open-section">Manage branches</span>
         </RouterLink>
 
-        <article class="management-card">
+        <RouterLink class="management-card management-card-link" to="/dashboard/admin/staff">
           <span class="card-icon" aria-hidden="true">04</span>
           <h2>Staff Management</h2>
           <p>Staff profiles and role administration.</p>
-          <span class="coming-soon">Coming Soon</span>
-        </article>
+          <span class="open-section">Manage staff</span>
+        </RouterLink>
 
         <article class="management-card">
           <span class="card-icon" aria-hidden="true">05</span>

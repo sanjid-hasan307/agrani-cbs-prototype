@@ -51,6 +51,12 @@ The Vue client uses the following Django API routes:
 | `POST` | `/api/admin/branches/` | Create a branch |
 | `PATCH` | `/api/admin/branches/<id>/` | Update or activate/deactivate a branch |
 | `GET` | `/api/admin/branches/options/` | Get active branches for Admin forms |
+| `GET` | `/api/admin/staff/` | Get a paginated staff list |
+| `POST` | `/api/admin/staff/` | Create a managed staff account |
+| `GET` | `/api/admin/staff/<id>/` | Get staff details |
+| `PATCH` | `/api/admin/staff/<id>/` | Update staff profile or banking role |
+| `POST` | `/api/admin/staff/<id>/activate/` | Activate a managed staff account |
+| `POST` | `/api/admin/staff/<id>/deactivate/` | Deactivate a managed staff account |
 | `GET` | `/api/admin/accounts/` | Get a paginated account list |
 | `POST` | `/api/admin/accounts/` | Open an account with zero balances |
 | `GET` | `/api/admin/accounts/customers/options/` | Get eligible customers for account opening |
@@ -167,6 +173,29 @@ Create a branch with the required code, name, address, and district. Routing num
 The `201 Created` response is `{ "success": true, "branch": { ... } }` using the operational fields listed above. PATCH accepts only `branch_name`, `address`, `district`, `phone`, `email`, and boolean `is_active`. Branch code and routing number are immutable through the update API. Deactivation records an audit action and does not reassign or delete customers, accounts, staff, or transactions. No deletion endpoint is provided. The existing `/api/admin/branches/options/` contract remains unchanged and returns only active branches with ID, branch code, and branch name.
 
 Invalid input returns JSON `400`, duplicate branch code or routing number returns `409`, missing details return `404`, and audit-write failures return a generic `500`. Note: Django Admin branch deletion permissions are unchanged in this API step; a separate follow-up should restrict Django Admin deletion in favor of deactivation.
+
+Admin Staff Management APIs reuse the strict Admin session policy and require CSRF protection for writes. The paginated `GET /api/admin/staff/` and `GET /api/admin/staff/<id>/` responses expose only staff/profile fields, branch ID/code/name, the single detected non-Admin banking role, active flags, and timestamps. They do not include passwords, password hashes, arbitrary permissions, Django superuser state, or Django Admin access flags.
+
+Create staff with a username, password, employee ID, active branch database ID, and exactly one allowed role (`Manager`, `Officer`, `Teller`, or `Auditor`). Names, email, designation, and phone are optional:
+
+```json
+{
+  "username": "demo_staff",
+  "password": "Use-a-unique-strong-password",
+  "first_name": "Example",
+  "last_name": "Staff",
+  "email": "staff@example.invalid",
+  "employee_id": "DEMO-EMP-001",
+  "branch": 1,
+  "designation": "Operations Officer",
+  "phone": "",
+  "role": "Officer"
+}
+```
+
+The `201 Created` response is `{ "success": true, "staff": { ... } }`; it never returns the submitted password or its hash. Managed users are created active with `is_staff=false` and `is_superuser=false`. PATCH accepts only first name, last name, email, designation, phone, active-branch ID, and an optional approved role. Username and employee ID are immutable. Role changes replace the banking-role assignment with exactly one approved non-Admin role and are separately audited. Activate and deactivate are explicit POST actions that update both user and profile active flags; activation requires an active assigned branch. Each change and its audit record are atomic.
+
+Invalid data returns JSON `400`, duplicate username/employee ID returns `409`, unknown staff returns `404`, and audit failures return a generic `500`. No password-reset endpoint is included. Deactivation does not explicitly revoke existing sessions; Django’s authentication backend rejects inactive users when their session is next resolved, but this API does not guarantee immediate invalidation of every existing session. Role changes likewise do not explicitly revoke sessions. The APIs do not alter Django Admin permissions or the Admin authorization policy.
 
 Admin account APIs require an active session user directly in the Admin group with no conflicting banking-role membership. Account opening also requires a valid CSRF token. `GET /api/admin/accounts/` accepts a positive `page` parameter and returns up to 10 accounts with internal ID, account number, customer display name/CIF, product code/name, branch code/name, currency, status, and opening date. Customer identity-document and contact details are not included.
 

@@ -9,6 +9,9 @@ from .views import (
     admin_branches_api,
     admin_branch_detail_api,
     admin_branch_options_api,
+    admin_staff_api,
+    admin_staff_detail_api,
+    admin_staff_status_api,
     admin_accounts_api,
     admin_account_customer_options_api,
     admin_account_product_options_api,
@@ -56,6 +59,28 @@ urlpatterns = [
         'admin/branches/<int:branch_id>/',
         admin_branch_detail_api,
         name='admin_branch_detail_api'
+    ),
+    path(
+        'admin/staff/',
+        admin_staff_api,
+        name='admin_staff_api'
+    ),
+    path(
+        'admin/staff/<int:staff_id>/',
+        admin_staff_detail_api,
+        name='admin_staff_detail_api'
+    ),
+    path(
+        'admin/staff/<int:staff_id>/activate/',
+        admin_staff_status_api,
+        {"action": "activate"},
+        name='admin_staff_activate_api'
+    ),
+    path(
+        'admin/staff/<int:staff_id>/deactivate/',
+        admin_staff_status_api,
+        {"action": "deactivate"},
+        name='admin_staff_deactivate_api'
     ),
     path(
         'admin/customers/',

@@ -2195,3 +2195,473 @@ class AdminBranchManagementApiTests(TestCase):
             inactive.pk,
             [branch["id"] for branch in response.json()["branches"]],
         )
+
+
+class AdminStaffManagementApiTests(TestCase):
+    collection_url = "/api/admin/staff/"
+    detail_url = "/api/admin/staff/{}/"
+    activate_url = "/api/admin/staff/{}/activate/"
+    deactivate_url = "/api/admin/staff/{}/deactivate/"
+
+    def setUp(self):
+        self.admin_group, _ = Group.objects.get_or_create(name="Admin")
+        self.admin = User.objects.create_user(username="staff_api_admin")
+        self.admin.groups.add(self.admin_group)
+        self.branch = Branch.objects.create(
+            branch_code="STF001",
+            branch_name="Staff Test Branch",
+            address="Staff branch address",
+            district="Dhaka",
+        )
+        for role in ("Admin", "Manager", "Officer", "Teller", "Auditor"):
+            Group.objects.get_or_create(name=role)
+
+    def _payload(self, **overrides):
+        payload = {
+            "username": "new_managed_staff",
+            "password": "Safe-Staff-Password-2026!",
+            "first_name": "Rina",
+            "last_name": "Akter",
+            "email": "rina@example.invalid",
+            "employee_id": "EMP-API-001",
+            "branch": self.branch.pk,
+            "designation": "Operations Officer",
+            "phone": "01712345678",
+            "role": "Officer",
+        }
+        payload.update(overrides)
+        return payload
+
+    def _post(self, payload, *, url=None, client=None, raw_body=None):
+        client = client or self.client
+        body = json.dumps(payload) if raw_body is None else raw_body
+        return client.post(
+            url or self.collection_url,
+            data=body,
+            content_type="application/json",
+        )
+
+    def _patch(self, profile_id, payload, *, client=None):
+        client = client or self.client
+        return client.patch(
+            self.detail_url.format(profile_id),
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+    def _create_staff(self, *, username="existing_staff", employee_id="EMP-EXIST-01", role="Teller", branch=None):
+        user = User.objects.create_user(
+            username=username,
+            password="Existing-Staff-Password-2026!",
+            first_name="Existing",
+            last_name="Staff",
+            email="existing@example.invalid",
+        )
+        user.groups.add(Group.objects.get(name=role))
+        profile = StaffProfile.objects.create(
+            user=user,
+            employee_id=employee_id,
+            branch=branch or self.branch,
+            designation="Teller",
+            phone="01700000000",
+        )
+        return user, profile
+
+    def test_create_staff_sets_hashed_password_flags_role_and_audit(self):
+        self.client.force_login(self.admin)
+
+        response = self._post(self._payload())
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        user = User.objects.get(username="new_managed_staff")
+        profile = StaffProfile.objects.get(user=user)
+        self.assertTrue(user.check_password("Safe-Staff-Password-2026!"))
+        self.assertNotEqual(user.password, "Safe-Staff-Password-2026!")
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        self.assertTrue(user.is_active)
+        self.assertTrue(profile.is_active)
+        self.assertEqual(
+            list(user.groups.values_list("name", flat=True)),
+            ["Officer"],
+        )
+        self.assertEqual(data["staff"]["role"], "Officer")
+        self.assertNotIn("password", json.dumps(data))
+        self.assertNotIn(user.password, json.dumps(data))
+        audit = AuditLog.objects.get(
+            action="CREATE_STAFF",
+            object_id=str(profile.pk),
+        )
+        self.assertEqual(audit.user, self.admin)
+        self.assertNotIn("Safe-Staff-Password", audit.description)
+        self.assertNotIn(user.password, audit.description)
+
+    def test_create_staff_rejects_admin_role_privileged_fields_and_invalid_values(self):
+        self.client.force_login(self.admin)
+        cases = (
+            ("admin_role", self._payload(role="Admin")),
+            ("superuser", {**self._payload(), "is_superuser": True}),
+            ("is_staff", {**self._payload(), "is_staff": True}),
+            ("permissions", {**self._payload(), "user_permissions": []}),
+            ("groups", {**self._payload(), "groups": ["Manager"]}),
+            ("unknown", {**self._payload(), "unexpected": "value"}),
+            ("wrong_branch_type", self._payload(branch=True)),
+            ("invalid_role_type", self._payload(role=3)),
+            ("invalid_email", self._payload(email="not-an-email")),
+            ("missing", {"username": "missing_fields"}),
+            ("weak_password", self._payload(password="123")),
+        )
+        for label, payload in cases:
+            with self.subTest(label=label):
+                response = self._post(payload)
+                self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(username="new_managed_staff").exists())
+        self.assertEqual(StaffProfile.objects.count(), 0)
+
+    def test_create_staff_rejects_duplicate_username_and_employee_id(self):
+        self._create_staff(username="duplicate_staff", employee_id="EMP-DUP-01")
+        self.client.force_login(self.admin)
+
+        duplicate_username = self._post(
+            self._payload(username="duplicate_staff")
+        )
+        duplicate_employee = self._post(
+            self._payload(
+                username="another_staff",
+                employee_id="EMP-DUP-01",
+            )
+        )
+
+        self.assertEqual(duplicate_username.status_code, 409)
+        self.assertEqual(duplicate_employee.status_code, 409)
+        self.assertNotIn("UNIQUE", duplicate_employee.content.decode())
+
+    def test_create_staff_rejects_inactive_or_missing_branch(self):
+        inactive = Branch.objects.create(
+            branch_code="STF002",
+            branch_name="Inactive Staff Branch",
+            address="Inactive branch",
+            district="Dhaka",
+            is_active=False,
+        )
+        self.client.force_login(self.admin)
+
+        for branch_id in (inactive.pk, 999999):
+            with self.subTest(branch_id=branch_id):
+                response = self._post(self._payload(branch=branch_id))
+                self.assertEqual(response.status_code, 400)
+
+    def test_create_audit_failure_rolls_back_user_profile_and_role(self):
+        self.client.force_login(self.admin)
+        with patch.object(
+            AuditLog.objects,
+            "create",
+            side_effect=DatabaseError("audit unavailable"),
+        ):
+            response = self._post(self._payload())
+
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(User.objects.filter(username="new_managed_staff").exists())
+        self.assertFalse(StaffProfile.objects.filter(employee_id="EMP-API-001").exists())
+        self.assertNotIn("audit unavailable", response.content.decode())
+
+    def test_staff_list_is_paginated_safe_and_excludes_admin_or_superuser(self):
+        profiles = [
+            self._create_staff(
+                username=f"listed_staff_{index:02d}",
+                employee_id=f"EMP-LIST-{index:02d}",
+            )[1]
+            for index in range(11)
+        ]
+        privileged_user = User.objects.create_user(
+            username="excluded_superuser",
+            is_superuser=True,
+        )
+        StaffProfile.objects.create(
+            user=privileged_user,
+            employee_id="EMP-ROOT-01",
+            branch=self.branch,
+        )
+        admin_user = User.objects.create_user(username="excluded_admin_role")
+        admin_user.groups.add(Group.objects.get(name="Admin"))
+        StaffProfile.objects.create(
+            user=admin_user,
+            employee_id="EMP-ADMIN-01",
+            branch=self.branch,
+        )
+        self.client.force_login(self.admin)
+
+        page_one = self.client.get(self.collection_url, {"page": 1})
+        page_two = self.client.get(self.collection_url, {"page": 2})
+
+        self.assertEqual(page_one.status_code, 200)
+        self.assertEqual(page_one.json()["pagination"]["page_size"], 10)
+        self.assertEqual(len(page_one.json()["staff"]), 10)
+        self.assertEqual(len(page_two.json()["staff"]), 1)
+        results = page_one.json()["staff"] + page_two.json()["staff"]
+        self.assertEqual(
+            [row["id"] for row in results],
+            [profile.pk for profile in sorted(profiles, key=lambda item: item.employee_id)],
+        )
+        encoded = json.dumps(results)
+        for forbidden in (
+            "password",
+            "is_superuser",
+            "user_permissions",
+            "groups",
+            "is_staff",
+        ):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_detail_returns_safe_staff_fields_and_missing_id_404(self):
+        user, profile = self._create_staff()
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.detail_url.format(profile.pk))
+        missing = self.client.get(self.detail_url.format(999999))
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()["staff"]
+        self.assertEqual(data["username"], user.username)
+        self.assertEqual(data["branch"], {
+            "id": self.branch.pk,
+            "branch_code": self.branch.branch_code,
+            "branch_name": self.branch.branch_name,
+        })
+        self.assertEqual(data["role"], "Teller")
+        self.assertNotIn("password", response.content.decode())
+        self.assertEqual(missing.status_code, 404)
+
+    def test_patch_updates_profile_and_changes_exact_role_with_audit(self):
+        user, profile = self._create_staff()
+        self.client.force_login(self.admin)
+
+        response = self._patch(profile.pk, {
+            "first_name": "Updated",
+            "designation": "Senior Teller",
+            "role": "Manager",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertEqual(user.first_name, "Updated")
+        self.assertEqual(profile.designation, "Senior Teller")
+        self.assertEqual(set(user.groups.values_list("name", flat=True)), {"Manager"})
+        self.assertEqual(response.json()["staff"]["role"], "Manager")
+        update_audit = AuditLog.objects.get(
+            action="UPDATE_STAFF",
+            object_id=str(profile.pk),
+        )
+        role_audit = AuditLog.objects.get(
+            action="CHANGE_STAFF_ROLE",
+            object_id=str(profile.pk),
+        )
+        self.assertEqual(update_audit.user, self.admin)
+        self.assertEqual(role_audit.user, self.admin)
+        self.assertNotIn("Updated", update_audit.description)
+
+    def test_patch_rejects_username_employee_id_permissions_and_admin_role(self):
+        _, profile = self._create_staff()
+        self.client.force_login(self.admin)
+        payloads = (
+            {"username": "changed"},
+            {"employee_id": "CHANGED"},
+            {"is_superuser": True},
+            {"is_staff": True},
+            {"groups": ["Admin"]},
+            {"user_permissions": [1]},
+            {"role": "Admin"},
+            {"role": "Unknown"},
+            {"phone": 22},
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                response = self._patch(profile.pk, payload)
+                self.assertEqual(response.status_code, 400)
+
+    def test_role_change_rejects_existing_arbitrary_group(self):
+        user, profile = self._create_staff()
+        user.groups.add(Group.objects.get_or_create(name="Custom")[0])
+        self.client.force_login(self.admin)
+
+        response = self._patch(profile.pk, {"role": "Manager"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            set(user.groups.values_list("name", flat=True)),
+            {"Teller", "Custom"},
+        )
+
+    def test_update_audit_failure_rolls_back_profile_and_role(self):
+        user, profile = self._create_staff()
+        self.client.force_login(self.admin)
+
+        with patch.object(
+            AuditLog.objects,
+            "create",
+            side_effect=DatabaseError("audit unavailable"),
+        ):
+            response = self._patch(
+                profile.pk,
+                {"first_name": "Changed", "role": "Manager"},
+            )
+
+        self.assertEqual(response.status_code, 500)
+        user.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertEqual(user.first_name, "Existing")
+        self.assertEqual(set(user.groups.values_list("name", flat=True)), {"Teller"})
+
+    def test_deactivate_and_activate_update_both_flags_and_audit(self):
+        user, profile = self._create_staff()
+        self.client.force_login(self.admin)
+
+        deactivate = self.client.post(self.deactivate_url.format(profile.pk))
+        user.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertEqual(deactivate.status_code, 200)
+        self.assertFalse(user.is_active)
+        self.assertFalse(profile.is_active)
+        self.assertEqual(
+            AuditLog.objects.get(
+                action="DEACTIVATE_STAFF",
+                object_id=str(profile.pk),
+            ).user,
+            self.admin,
+        )
+
+        activate = self.client.post(self.activate_url.format(profile.pk))
+        user.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertEqual(activate.status_code, 200)
+        self.assertTrue(user.is_active)
+        self.assertTrue(profile.is_active)
+        self.assertEqual(
+            AuditLog.objects.get(
+                action="ACTIVATE_STAFF",
+                object_id=str(profile.pk),
+            ).user,
+            self.admin,
+        )
+
+    def test_activation_is_blocked_when_assigned_branch_is_inactive(self):
+        inactive_branch = Branch.objects.create(
+            branch_code="STF003",
+            branch_name="Closed Staff Branch",
+            address="Inactive branch",
+            district="Dhaka",
+            is_active=False,
+        )
+        user, profile = self._create_staff(
+            branch=inactive_branch,
+        )
+        user.is_active = False
+        user.save(update_fields=["is_active"])
+        profile.is_active = False
+        profile.save(update_fields=["is_active"])
+        self.client.force_login(self.admin)
+
+        response = self.client.post(self.activate_url.format(profile.pk))
+
+        self.assertEqual(response.status_code, 400)
+        user.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertFalse(user.is_active)
+        self.assertFalse(profile.is_active)
+
+    def test_status_audit_failure_rolls_back_both_active_flags(self):
+        user, profile = self._create_staff()
+        self.client.force_login(self.admin)
+
+        with patch.object(
+            AuditLog.objects,
+            "create",
+            side_effect=DatabaseError("audit unavailable"),
+        ):
+            response = self.client.post(self.deactivate_url.format(profile.pk))
+
+        self.assertEqual(response.status_code, 500)
+        user.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertTrue(user.is_active)
+        self.assertTrue(profile.is_active)
+
+    def test_authorization_is_enforced_for_all_staff_endpoints(self):
+        manager = User.objects.create_user(username="staff_api_manager")
+        manager.groups.add(Group.objects.get(name="Manager"))
+        teller = User.objects.create_user(username="staff_api_teller")
+        teller.groups.add(Group.objects.get(name="Teller"))
+        ungrouped_superuser = User.objects.create_superuser(
+            username="staff_api_superuser",
+            email="staff-api-superuser@example.invalid",
+            password="Test-Superuser-Password-2026!",
+        )
+        inactive_admin = User.objects.create_user(
+            username="staff_api_inactive_admin",
+            is_active=False,
+        )
+        inactive_admin.groups.add(self.admin_group)
+        conflicting_admin = User.objects.create_user(
+            username="staff_api_conflicting_admin",
+        )
+        conflicting_admin.groups.add(
+            self.admin_group,
+            Group.objects.get(name="Manager"),
+        )
+        _, profile = self._create_staff()
+
+        denied_users = (
+            (None, 401),
+            (manager, 403),
+            (teller, 403),
+            (ungrouped_superuser, 403),
+            (inactive_admin, 401),
+            (conflicting_admin, 403),
+        )
+        for user, expected in denied_users:
+            with self.subTest(username=user.username if user else "anonymous"):
+                self.client.logout()
+                if user is not None:
+                    self.client.force_login(user)
+                responses = (
+                    self.client.get(self.collection_url),
+                    self.client.get(self.detail_url.format(profile.pk)),
+                    self._post(self._payload()),
+                    self._patch(profile.pk, {"first_name": "No"}),
+                    self.client.post(self.activate_url.format(profile.pk)),
+                    self.client.post(self.deactivate_url.format(profile.pk)),
+                )
+                self.assertEqual(
+                    [response.status_code for response in responses],
+                    [expected] * len(responses),
+                )
+
+    def test_csrf_is_enforced_for_create_patch_and_status_changes(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.admin)
+        _, profile = self._create_staff()
+
+        responses = (
+            self._post(self._payload(), client=client),
+            self._patch(profile.pk, {"first_name": "No CSRF"}, client=client),
+            client.post(self.activate_url.format(profile.pk)),
+            client.post(self.deactivate_url.format(profile.pk)),
+        )
+        self.assertEqual([response.status_code for response in responses], [403] * 4)
+        for response in responses:
+            self.assertEqual(response.json()["message"], "CSRF verification failed.")
+
+    def test_invalid_page_and_method_are_rejected(self):
+        self.client.force_login(self.admin)
+
+        self.assertEqual(
+            self.client.get(self.collection_url, {"page": "0"}).status_code,
+            400,
+        )
+        self.assertEqual(self.client.delete(self.collection_url).status_code, 405)
+        self.assertEqual(
+            self.client.delete(self.detail_url.format(1)).status_code,
+            405,
+        )

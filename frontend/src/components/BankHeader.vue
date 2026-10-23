@@ -14,6 +14,7 @@ const dashboardTitle = computed(() => {
   if (route.path === '/dashboard/admin/customers') return 'Customer Management'
   if (route.path === '/dashboard/admin/accounts') return 'Account Management'
   if (route.path === '/dashboard/admin/branches') return 'Branch Management'
+  if (route.path === '/dashboard/admin/staff') return 'Staff Management'
   if (route.path === '/dashboard/admin') return 'Admin Dashboard'
   if (route.path === '/dashboard/manager') return 'Manager Dashboard'
   if (route.path === '/dashboard/teller') return 'Teller Dashboard'

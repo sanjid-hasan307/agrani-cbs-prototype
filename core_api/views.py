@@ -3,6 +3,8 @@ from datetime import date
 from decimal import Decimal
 
 from django.contrib.auth import authenticate, login as django_login
+from django.contrib.auth.models import Group, User
+from django.contrib.auth.password_validation import validate_password
 from django.db import DatabaseError, IntegrityError, transaction
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -25,6 +27,7 @@ from customers.models import Customer
 from accounts.models import Account
 from products.models import AccountProduct
 from transactions.models import Transaction
+from users.models import StaffProfile
 from transactions.services.authorization_service import (
     approve_transaction,
     reject_transaction,
@@ -873,6 +876,599 @@ def admin_branch_detail_api(request, branch_id):
     return JsonResponse({
         "success": True,
         "branch": _branch_response(branch),
+    })
+
+
+_STAFF_ROLES = ("Manager", "Officer", "Teller", "Auditor")
+_STAFF_BANKING_ROLES = ("Admin", *_STAFF_ROLES)
+_STAFF_CREATE_FIELDS = {
+    "username",
+    "password",
+    "first_name",
+    "last_name",
+    "email",
+    "employee_id",
+    "branch",
+    "designation",
+    "phone",
+    "role",
+}
+_STAFF_UPDATE_FIELDS = {
+    "first_name",
+    "last_name",
+    "email",
+    "designation",
+    "phone",
+    "branch",
+    "role",
+}
+_STAFF_REQUIRED_CREATE_FIELDS = {
+    "username",
+    "password",
+    "employee_id",
+    "branch",
+    "role",
+}
+_STAFF_FIELD_MAX_LENGTHS = {
+    "username": 150,
+    "password": 256,
+    "first_name": 150,
+    "last_name": 150,
+    "email": 254,
+    "employee_id": 30,
+    "designation": 100,
+    "phone": 20,
+    "role": 20,
+}
+_MAX_STAFF_REQUEST_BYTES = 16_384
+
+
+class _StaffAuditWriteFailed(Exception):
+    pass
+
+
+def _staff_api_error(message, *, errors=None, status_code=400):
+    response = {"success": False, "message": message}
+    if errors:
+        response["errors"] = errors
+    return JsonResponse(response, status=status_code)
+
+
+def _parse_staff_payload(request, *, create):
+    if request.content_type != "application/json":
+        return None, _staff_api_error(
+            "Content-Type must be application/json."
+        )
+    content_length = request.META.get("CONTENT_LENGTH")
+    if content_length:
+        try:
+            if int(content_length) > _MAX_STAFF_REQUEST_BYTES:
+                return None, _staff_api_error(
+                    "Request body is too large.",
+                    status_code=413,
+                )
+        except ValueError:
+            return None, _staff_api_error("Invalid Content-Length header.")
+
+    try:
+        body = request.body
+    except RequestDataTooBig:
+        return None, _staff_api_error(
+            "Request body is too large.",
+            status_code=413,
+        )
+    if len(body) > _MAX_STAFF_REQUEST_BYTES:
+        return None, _staff_api_error(
+            "Request body is too large.",
+            status_code=413,
+        )
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, _staff_api_error("Request body must be valid JSON.")
+    if not isinstance(payload, dict) or not payload:
+        return None, _staff_api_error(
+            "Request body must be a non-empty JSON object."
+        )
+
+    allowed_fields = _STAFF_CREATE_FIELDS if create else _STAFF_UPDATE_FIELDS
+    if payload.keys() - allowed_fields:
+        return None, _staff_api_error(
+            "Request contains unsupported staff fields."
+        )
+    if create:
+        missing = _STAFF_REQUIRED_CREATE_FIELDS - payload.keys()
+        if missing:
+            return None, _staff_api_error(
+                "Required staff fields are missing.",
+                errors={
+                    field: ["This field is required."]
+                    for field in sorted(missing)
+                },
+            )
+
+    normalized = {}
+    optional_text = {
+        "first_name",
+        "last_name",
+        "email",
+        "designation",
+        "phone",
+    }
+    for field, value in payload.items():
+        if field == "branch":
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                return None, _staff_api_error(
+                    "Branch must be a valid database ID.",
+                    errors={field: ["Select a valid branch."]},
+                )
+            normalized[field] = value
+            continue
+        if not isinstance(value, str):
+            return None, _staff_api_error(
+                "Staff fields must have valid types.",
+                errors={field: ["Enter a valid value."]},
+            )
+        if field in optional_text and not value.strip():
+            value = ""
+        elif field in {"username", "employee_id", "role"}:
+            value = value.strip()
+            if not value:
+                return None, _staff_api_error(
+                    "Required staff fields cannot be blank.",
+                    errors={field: ["This field is required."]},
+                )
+        if len(value) > _STAFF_FIELD_MAX_LENGTHS[field]:
+            return None, _staff_api_error(
+                "Staff field exceeds the maximum allowed length.",
+                errors={field: ["Value exceeds the maximum allowed length."]},
+            )
+        normalized[field] = value
+
+    if "role" in normalized and normalized["role"] not in _STAFF_ROLES:
+        return None, _staff_api_error(
+            "Select one approved non-Admin banking role.",
+            errors={"role": ["Unsupported banking role."]},
+        )
+    return normalized, None
+
+
+def _staff_banking_role(user):
+    roles = set(user.groups.filter(name__in=_STAFF_ROLES).values_list(
+        "name",
+        flat=True,
+    ))
+    if len(roles) == 1 and not user.groups.filter(name="Admin").exists():
+        return next(iter(roles))
+    if not roles and not user.groups.filter(name="Admin").exists():
+        return None
+    return "CONFLICT"
+
+
+def _staff_response(profile):
+    user = profile.user
+    branch = profile.branch
+    return {
+        "id": profile.pk,
+        "employee_id": profile.employee_id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "email": user.email,
+        "designation": profile.designation,
+        "phone": profile.phone,
+        "branch": {
+            "id": branch.pk,
+            "branch_code": branch.branch_code,
+            "branch_name": branch.branch_name,
+        },
+        "role": _staff_banking_role(user),
+        "user_is_active": user.is_active,
+        "profile_is_active": profile.is_active,
+        "created_at": profile.created_at.isoformat(),
+        "updated_at": profile.updated_at.isoformat(),
+    }
+
+
+def _get_managed_staff_queryset():
+    return StaffProfile.objects.select_related("user", "branch").exclude(
+        user__is_superuser=True,
+    ).exclude(
+        user__groups__name="Admin",
+    ).distinct()
+
+
+def _get_managed_staff_for_update(staff_id):
+    profile = StaffProfile.objects.select_for_update().select_related(
+        "user",
+        "branch",
+    ).filter(pk=staff_id).first()
+    if (
+        profile is None
+        or profile.user.is_superuser
+        or profile.user.groups.filter(name="Admin").exists()
+    ):
+        return None
+    return profile
+
+
+def _validate_staff_email(email):
+    try:
+        User._meta.get_field("email").clean(email, None)
+    except ValidationError:
+        return False
+    return True
+
+
+@json_csrf_protect
+def admin_staff_api(request):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    if request.method == "POST":
+        payload, error_response = _parse_staff_payload(request, create=True)
+        if error_response:
+            return error_response
+        if not _validate_staff_email(payload.get("email", "")):
+            return _staff_api_error(
+                "Enter a valid email address.",
+                errors={"email": ["Enter a valid email address."]},
+            )
+
+        try:
+            branch = Branch.objects.get(
+                pk=payload["branch"],
+                is_active=True,
+            )
+        except Branch.DoesNotExist:
+            return _staff_api_error(
+                "Select an existing active branch.",
+                errors={"branch": ["Select an existing active branch."]},
+            )
+
+        user = User(
+            username=payload["username"],
+            first_name=payload.get("first_name", ""),
+            last_name=payload.get("last_name", ""),
+            email=payload.get("email", ""),
+            is_active=True,
+            is_staff=False,
+            is_superuser=False,
+        )
+        try:
+            User._meta.get_field("username").clean(user.username, user)
+        except ValidationError:
+            return _staff_api_error(
+                "Username is invalid.",
+                errors={"username": ["Enter a valid username."]},
+            )
+        try:
+            validate_password(payload["password"], user=user)
+        except ValidationError:
+            return _staff_api_error(
+                "Password does not meet the configured security requirements.",
+                errors={"password": ["Choose a stronger password."]},
+            )
+
+        try:
+            with transaction.atomic():
+                branch = Branch.objects.select_for_update().get(
+                    pk=payload["branch"],
+                    is_active=True,
+                )
+                user = User.objects.create_user(
+                    username=payload["username"],
+                    password=payload["password"],
+                    first_name=payload.get("first_name", ""),
+                    last_name=payload.get("last_name", ""),
+                    email=payload.get("email", ""),
+                    is_active=True,
+                    is_staff=False,
+                    is_superuser=False,
+                )
+                profile = StaffProfile.objects.create(
+                    user=user,
+                    employee_id=payload["employee_id"],
+                    branch=branch,
+                    designation=payload.get("designation") or None,
+                    phone=payload.get("phone") or None,
+                    is_active=True,
+                )
+                role_group = Group.objects.get(name=payload["role"])
+                user.groups.add(role_group)
+                try:
+                    AuditLog.objects.create(
+                        user=request.user,
+                        action="CREATE_STAFF",
+                        model_name="StaffProfile",
+                        object_id=str(profile.pk),
+                        description=(
+                            f"Staff profile created with role {payload['role']}."
+                        ),
+                        ip_address=request.META.get("REMOTE_ADDR"),
+                    )
+                except DatabaseError as error:
+                    raise _StaffAuditWriteFailed from error
+        except Branch.DoesNotExist:
+            return _staff_api_error(
+                "Select an existing active branch.",
+                errors={"branch": ["Select an existing active branch."]},
+            )
+        except Group.DoesNotExist:
+            return _staff_api_error(
+                "The selected banking role is not configured.",
+                status_code=400,
+            )
+        except IntegrityError:
+            return _staff_api_error(
+                "Username or employee ID already exists.",
+                status_code=409,
+            )
+        except _StaffAuditWriteFailed:
+            return _staff_api_error(
+                "Staff account could not be created.",
+                status_code=500,
+            )
+
+        return JsonResponse(
+            {"success": True, "staff": _staff_response(profile)},
+            status=201,
+        )
+
+    if request.method != "GET":
+        return _staff_api_error(
+            "GET or POST method required.",
+            status_code=405,
+        )
+
+    page_value = request.GET.get("page", "1")
+    try:
+        page_number = int(page_value)
+        if page_number < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return _staff_api_error("Page must be a positive integer.")
+
+    profiles = _get_managed_staff_queryset().only(
+        "id",
+        "employee_id",
+        "designation",
+        "phone",
+        "is_active",
+        "created_at",
+        "updated_at",
+        "user__id",
+        "user__username",
+        "user__first_name",
+        "user__last_name",
+        "user__email",
+        "user__is_active",
+        "branch__id",
+        "branch__branch_code",
+        "branch__branch_name",
+    ).order_by("employee_id", "id")
+    paginator = Paginator(profiles, 10)
+    page_obj = paginator.get_page(page_number)
+    return JsonResponse({
+        "success": True,
+        "pagination": {
+            "page": page_obj.number,
+            "page_size": paginator.per_page,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        },
+        "staff": [
+            _staff_response(profile)
+            for profile in page_obj.object_list
+        ],
+    })
+
+
+@json_csrf_protect
+def admin_staff_detail_api(request, staff_id):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+
+    if request.method == "GET":
+        profile = _get_managed_staff_queryset().filter(pk=staff_id).first()
+        if profile is None:
+            return _staff_api_error("Staff member not found.", status_code=404)
+        return JsonResponse({
+            "success": True,
+            "staff": _staff_response(profile),
+        })
+
+    if request.method != "PATCH":
+        return _staff_api_error(
+            "GET or PATCH method required.",
+            status_code=405,
+        )
+
+    payload, error_response = _parse_staff_payload(request, create=False)
+    if error_response:
+        return error_response
+    if "email" in payload and not _validate_staff_email(payload["email"]):
+        return _staff_api_error(
+            "Enter a valid email address.",
+            errors={"email": ["Enter a valid email address."]},
+        )
+    if not any(field in payload for field in _STAFF_UPDATE_FIELDS):
+        return _staff_api_error("At least one editable field is required.")
+
+    try:
+        with transaction.atomic():
+            profile = _get_managed_staff_for_update(staff_id)
+            if profile is None:
+                return _staff_api_error(
+                    "Staff member not found.",
+                    status_code=404,
+                )
+            if "branch" in payload:
+                try:
+                    branch = Branch.objects.select_for_update().get(
+                        pk=payload["branch"],
+                        is_active=True,
+                    )
+                except Branch.DoesNotExist:
+                    return _staff_api_error(
+                        "Select an existing active branch.",
+                        errors={"branch": ["Select an existing active branch."]},
+                    )
+                profile.branch = branch
+
+            role = payload.get("role")
+            previous_role = _staff_banking_role(profile.user)
+            if role:
+                groups = set(profile.user.groups.values_list("name", flat=True))
+                banking_groups = groups.intersection(_STAFF_BANKING_ROLES)
+                unexpected_groups = groups - banking_groups
+                if unexpected_groups:
+                    return _staff_api_error(
+                        "Staff with additional group memberships cannot have their role changed."
+                    )
+                if previous_role != role:
+                    role_group = Group.objects.filter(name=role).first()
+                    if role_group is None:
+                        return _staff_api_error(
+                            "The selected banking role is not configured."
+                        )
+                    profile.user.groups.remove(
+                        *Group.objects.filter(name__in=_STAFF_BANKING_ROLES)
+                    )
+                    profile.user.groups.add(role_group)
+
+            user_fields = []
+            for field in ("first_name", "last_name", "email"):
+                if field in payload:
+                    setattr(profile.user, field, payload[field])
+                    user_fields.append(field)
+            if user_fields:
+                profile.user.save(update_fields=user_fields)
+
+            for field in ("designation", "phone"):
+                if field in payload:
+                    setattr(profile, field, payload[field] or None)
+            profile.full_clean()
+            profile.save()
+
+            changed_profile_fields = sorted(
+                set(payload).intersection({
+                    "branch",
+                    "designation",
+                    "phone",
+                })
+            )
+            if user_fields or changed_profile_fields:
+                try:
+                    AuditLog.objects.create(
+                        user=request.user,
+                        action="UPDATE_STAFF",
+                        model_name="StaffProfile",
+                        object_id=str(profile.pk),
+                        description=(
+                            "Staff profile updated "
+                            f"(fields: {', '.join(sorted(user_fields + changed_profile_fields))})."
+                        ),
+                        ip_address=request.META.get("REMOTE_ADDR"),
+                    )
+                except DatabaseError as error:
+                    raise _StaffAuditWriteFailed from error
+
+            if role and previous_role != role:
+                try:
+                    AuditLog.objects.create(
+                        user=request.user,
+                        action="CHANGE_STAFF_ROLE",
+                        model_name="StaffProfile",
+                        object_id=str(profile.pk),
+                        description=f"Staff banking role changed to {role}.",
+                        ip_address=request.META.get("REMOTE_ADDR"),
+                    )
+                except DatabaseError as error:
+                    raise _StaffAuditWriteFailed from error
+    except ValidationError:
+        return _staff_api_error("Staff profile data is invalid.")
+    except IntegrityError:
+        return _staff_api_error(
+            "Staff update conflicts with an existing record.",
+            status_code=409,
+        )
+    except _StaffAuditWriteFailed:
+        return _staff_api_error(
+            "Staff update could not be completed.",
+            status_code=500,
+        )
+
+    return JsonResponse({
+        "success": True,
+        "staff": _staff_response(profile),
+    })
+
+
+@json_csrf_protect
+def admin_staff_status_api(request, staff_id, action):
+    authorization_error = _admin_authorization_error(request.user)
+    if authorization_error:
+        return authorization_error
+    if request.method != "POST":
+        return _staff_api_error("POST method required.", status_code=405)
+
+    if action not in {"activate", "deactivate"}:
+        return _staff_api_error("Unsupported staff status action.")
+
+    try:
+        with transaction.atomic():
+            profile = _get_managed_staff_for_update(staff_id)
+            if profile is None:
+                return _staff_api_error(
+                    "Staff member not found.",
+                    status_code=404,
+                )
+            if action == "activate":
+                branch = Branch.objects.select_for_update().filter(
+                    pk=profile.branch_id,
+                    is_active=True,
+                ).first()
+                if branch is None:
+                    return _staff_api_error(
+                        "Staff cannot be activated while their branch is inactive."
+                    )
+                if _staff_banking_role(profile.user) not in _STAFF_ROLES:
+                    return _staff_api_error(
+                        "Staff must have exactly one approved banking role before activation."
+                    )
+
+            is_active = action == "activate"
+            profile.user.is_active = is_active
+            profile.is_active = is_active
+            profile.user.save(update_fields=["is_active"])
+            profile.save(update_fields=["is_active", "updated_at"])
+            try:
+                AuditLog.objects.create(
+                    user=request.user,
+                    action="ACTIVATE_STAFF" if is_active else "DEACTIVATE_STAFF",
+                    model_name="StaffProfile",
+                    object_id=str(profile.pk),
+                    description=(
+                        f"Staff profile {'activated' if is_active else 'deactivated'}."
+                    ),
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                )
+            except DatabaseError as error:
+                raise _StaffAuditWriteFailed from error
+    except _StaffAuditWriteFailed:
+        return _staff_api_error(
+            "Staff status could not be changed.",
+            status_code=500,
+        )
+
+    return JsonResponse({
+        "success": True,
+        "staff": _staff_response(profile),
     })
 
 
